@@ -1,15 +1,6 @@
 {
-  "originHash" : "08de61941b7919a65e36c0e34f8c1c41995469b86a39122158b75b4a68c4527d",
+  "originHash" : "7b6d30e275f7e505c60eabf5a7aad35e3b04316003536379bde8b5c5ffc04fa9",
   "pins" : [
-    {
-      "identity" : "eventsource",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/loopwork-ai/eventsource.git",
-      "state" : {
-        "revision" : "e83f076811f32757305b8bf69ac92d05626ffdd7",
-        "version" : "1.1.0"
-      }
-    },
     {
       "identity" : "swift-log",
       "kind" : "remoteSourceControl",
