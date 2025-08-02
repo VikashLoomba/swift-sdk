@@ -194,8 +194,8 @@ extension OAuthHTTPClientTransport {
         scopes: [String] = [],
         tokenStorage: TokenStorage? = nil,
         logger: Logger? = nil
-    ) -> OAuthHTTPClientTransport {
-        let config = OAuthConfiguration(
+    ) throws -> OAuthHTTPClientTransport {
+        let config = try OAuthConfiguration(
             authorizationEndpoint: tokenEndpoint, // Not used for client credentials
             tokenEndpoint: tokenEndpoint,
             clientId: clientId,

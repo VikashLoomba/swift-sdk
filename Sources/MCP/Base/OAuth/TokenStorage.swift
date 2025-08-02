@@ -118,7 +118,6 @@ public actor KeychainTokenStorage: TokenStorage {
 #endif
 
 #if os(Linux)
-import SystemPackage
 
 /// File-based encrypted token storage for Linux
 public actor FileTokenStorage: TokenStorage {

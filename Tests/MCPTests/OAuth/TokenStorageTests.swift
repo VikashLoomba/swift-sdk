@@ -97,7 +97,7 @@ struct TokenStorageTests {
     }
     
     @Test("File token storage - filename sanitization")
-    func testFileTokenStorageFilenamesanitization() async throws {
+    func testFileTokenStorageFilenameSanitization() async throws {
         let tempDir = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("oauth-test-sanitize-\(UUID().uuidString)")
         

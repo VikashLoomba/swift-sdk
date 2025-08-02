@@ -302,8 +302,20 @@ public actor OAuthAuthenticator {
         // Remove from storage
         try await tokenStorage.delete(for: identifier)
         
-        // TODO: If the server supports token revocation endpoint, call it here
-        logger.info("Token revoked")
+        // If the server supports token revocation endpoint, call it
+        if let revocationEndpoint = configuration.revocationEndpoint {
+            do {
+                try await performTokenRevocation(token: token, endpoint: revocationEndpoint)
+                logger.info("Token revoked from server")
+            } catch {
+                logger.warning("Failed to revoke token from server", metadata: [
+                    "error": "\(error.localizedDescription)"
+                ])
+                // Don't throw here as token was already removed from local storage
+            }
+        } else {
+            logger.info("Token revoked locally (no revocation endpoint configured)")
+        }
     }
     
     // MARK: - Private Methods
@@ -386,9 +398,18 @@ public actor OAuthAuthenticator {
         
         guard 200..<300 ~= httpResponse.statusCode else {
             let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
+            // Sanitize error body for logging to prevent sensitive information leakage
+            let sanitizedErrorBody: String
+            if let errorData = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let error = errorData["error"] as? String {
+                sanitizedErrorBody = error
+            } else {
+                sanitizedErrorBody = "HTTP \(httpResponse.statusCode)"
+            }
+            
             logger.error("Token request failed", metadata: [
                 "statusCode": "\(httpResponse.statusCode)",
-                "body": "\(errorBody)"
+                "error": "\(sanitizedErrorBody)"
             ])
             throw OAuthError.tokenRequestFailed(httpResponse.statusCode, errorBody)
         }
@@ -417,6 +438,39 @@ public actor OAuthAuthenticator {
                 return "\(encodedKey)=\(encodedValue)"
             }
             .joined(separator: "&")
+    }
+    
+    private func performTokenRevocation(token: OAuthToken, endpoint: URL) async throws {
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+        
+        var parameters: [String: String] = [
+            "token": token.accessToken,
+            "token_type_hint": "access_token"
+        ]
+        
+        // Add client authentication if available
+        if let clientSecret = configuration.clientSecret {
+            parameters["client_id"] = configuration.clientId
+            parameters["client_secret"] = clientSecret
+        } else {
+            parameters["client_id"] = configuration.clientId
+        }
+        
+        request.httpBody = formURLEncode(parameters).data(using: .utf8)
+        
+        let (_, response) = try await urlSession.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw OAuthError.invalidResponse
+        }
+        
+        // RFC 7009: The authorization server responds with HTTP status code 200 if the
+        // revocation is successful or if the client submitted an invalid token
+        guard 200..<300 ~= httpResponse.statusCode else {
+            throw OAuthError.tokenRequestFailed(httpResponse.statusCode, "Revocation failed")
+        }
     }
 }
 

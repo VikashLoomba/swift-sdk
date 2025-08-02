@@ -11,8 +11,8 @@ import FoundationNetworking
 struct OAuth21AuthorizationCodeFlowTests {
     
     @Test("Authorization code exchange with state mismatch fails")
-    func testAuthorizationCodeExchangeWithStateMismatchFails() async {
-        let config = OAuthConfiguration.publicClient(
+    func testAuthorizationCodeExchangeWithStateMismatchFails() async throws {
+        let config = try OAuthConfiguration.publicClient(
             authorizationEndpoint: URL(string: "https://example.com/auth")!,
             tokenEndpoint: URL(string: "https://example.com/token")!,
             clientId: "test-client",
@@ -37,8 +37,8 @@ struct OAuth21AuthorizationCodeFlowTests {
     }
     
     @Test("Authorization code exchange without redirect URI fails")
-    func testAuthorizationCodeExchangeWithoutRedirectURIFails() async {
-        let config = OAuthConfiguration(
+    func testAuthorizationCodeExchangeWithoutRedirectURIFails() async throws {
+        let config = try OAuthConfiguration(
             authorizationEndpoint: URL(string: "https://example.com/auth")!,
             tokenEndpoint: URL(string: "https://example.com/token")!,
             clientId: "test-client",

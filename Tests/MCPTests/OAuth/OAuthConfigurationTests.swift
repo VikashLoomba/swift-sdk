@@ -7,8 +7,8 @@ import Foundation
 struct OAuthConfigurationTests {
     
     @Test("OAuth 2.1 confidential client configuration")
-    func testOAuth21ConfidentialClientConfiguration() {
-        let config = OAuthConfiguration(
+    func testOAuth21ConfidentialClientConfiguration() throws {
+        let config = try OAuthConfiguration(
             authorizationEndpoint: URL(string: "https://example.com/auth")!,
             tokenEndpoint: URL(string: "https://example.com/token")!,
             clientId: "test-client-id",
@@ -35,8 +35,8 @@ struct OAuthConfigurationTests {
     }
     
     @Test("OAuth 2.1 public client configuration with mandatory PKCE")
-    func testOAuth21PublicClientConfiguration() {
-        let config = OAuthConfiguration(
+    func testOAuth21PublicClientConfiguration() throws {
+        let config = try OAuthConfiguration(
             authorizationEndpoint: URL(string: "https://example.com/auth")!,
             tokenEndpoint: URL(string: "https://example.com/token")!,
             clientId: "test-client-id",
@@ -56,9 +56,9 @@ struct OAuthConfigurationTests {
     }
     
     @Test("OAuth 2.1 public client preset configurations")
-    func testOAuth21PublicClientPresets() {
+    func testOAuth21PublicClientPresets() throws {
         // GitHub public client
-        let githubConfig = OAuthConfiguration.github(
+        let githubConfig = try OAuthConfiguration.github(
             clientId: "github-public-client",
             scopes: ["repo", "user"]
         )
@@ -68,7 +68,7 @@ struct OAuthConfigurationTests {
         #expect(githubConfig.usePKCE == true)
         
         // Google public client
-        let googleConfig = OAuthConfiguration.google(
+        let googleConfig = try OAuthConfiguration.google(
             clientId: "google-public-client",
             scopes: ["openid", "profile"]
         )
@@ -78,7 +78,7 @@ struct OAuthConfigurationTests {
         #expect(googleConfig.usePKCE == true)
         
         // Microsoft public client
-        let microsoftConfig = OAuthConfiguration.microsoft(
+        let microsoftConfig = try OAuthConfiguration.microsoft(
             clientId: "microsoft-public-client",
             scopes: ["User.Read"]
         )
@@ -89,8 +89,8 @@ struct OAuthConfigurationTests {
     }
     
     @Test("OAuth 2.1 generic public client factory method")
-    func testOAuth21GenericPublicClient() {
-        let config = OAuthConfiguration.publicClient(
+    func testOAuth21GenericPublicClient() throws {
+        let config = try OAuthConfiguration.publicClient(
             authorizationEndpoint: URL(string: "https://example.com/auth")!,
             tokenEndpoint: URL(string: "https://example.com/token")!,
             clientId: "test-public-client",
@@ -109,8 +109,8 @@ struct OAuthConfigurationTests {
     }
     
     @Test("OAuth 2.1 generic confidential client factory method")
-    func testOAuth21GenericConfidentialClient() {
-        let config = OAuthConfiguration.confidentialClient(
+    func testOAuth21GenericConfidentialClient() throws {
+        let config = try OAuthConfiguration.confidentialClient(
             authorizationEndpoint: URL(string: "https://example.com/auth")!,
             tokenEndpoint: URL(string: "https://example.com/token")!,
             clientId: "test-confidential-client",
@@ -130,8 +130,8 @@ struct OAuthConfigurationTests {
     }
     
     @Test("GitHub OAuth 2.1 configuration preset")
-    func testGitHubConfigurationPreset() {
-        let config = OAuthConfiguration.github(
+    func testGitHubConfigurationPreset() throws {
+        let config = try OAuthConfiguration.github(
             clientId: "github-client-id",
             clientSecret: "github-secret",
             scopes: ["repo", "user"]
@@ -147,8 +147,8 @@ struct OAuthConfigurationTests {
     }
     
     @Test("Google OAuth 2.1 configuration preset")
-    func testGoogleConfigurationPreset() {
-        let config = OAuthConfiguration.google(
+    func testGoogleConfigurationPreset() throws {
+        let config = try OAuthConfiguration.google(
             clientId: "google-client-id",
             clientSecret: "google-secret",
             scopes: ["openid", "profile"]
@@ -163,8 +163,8 @@ struct OAuthConfigurationTests {
     }
     
     @Test("Microsoft OAuth 2.1 configuration preset")
-    func testMicrosoftConfigurationPreset() {
-        let config = OAuthConfiguration.microsoft(
+    func testMicrosoftConfigurationPreset() throws {
+        let config = try OAuthConfiguration.microsoft(
             clientId: "microsoft-client-id",
             clientSecret: "microsoft-secret",
             tenantId: "custom-tenant",
@@ -184,5 +184,32 @@ struct OAuthConfigurationTests {
         #expect(PKCECodeChallengeMethod.plain.rawValue == "plain")
         #expect(PKCECodeChallengeMethod.S256.rawValue == "S256")
         #expect(PKCECodeChallengeMethod.allCases.count == 2)
+    }
+    
+    @Test("OAuth 2.1 public client with secret should throw error")
+    func testPublicClientWithSecretThrowsError() {
+        #expect(throws: OAuthConfigurationError.publicClientWithSecret) {
+            _ = try OAuthConfiguration(
+                authorizationEndpoint: URL(string: "https://example.com/auth")!,
+                tokenEndpoint: URL(string: "https://example.com/token")!,
+                clientId: "test-client",
+                clientSecret: "secret", // This should cause an error for public client
+                clientType: .public
+            )
+        }
+    }
+    
+    @Test("OAuth 2.1 public client without PKCE should throw error")
+    func testPublicClientWithoutPKCEThrowsError() {
+        #expect(throws: OAuthConfigurationError.publicClientWithoutPKCE) {
+            _ = try OAuthConfiguration(
+                authorizationEndpoint: URL(string: "https://example.com/auth")!,
+                tokenEndpoint: URL(string: "https://example.com/token")!,
+                clientId: "test-client",
+                clientSecret: nil,
+                clientType: .public,
+                usePKCE: false // This should cause an error for public client
+            )
+        }
     }
 }

@@ -9,7 +9,7 @@ struct OAuthHTTPTransportTests {
     
     @Test("OAuth HTTP transport initialization")
     func testOAuthHTTPTransportInit() async throws {
-        let config = OAuthConfiguration(
+        let config = try OAuthConfiguration(
             authorizationEndpoint: URL(string: "https://example.com/auth")!,
             tokenEndpoint: URL(string: "https://example.com/token")!,
             clientId: "test-client",
@@ -28,8 +28,8 @@ struct OAuthHTTPTransportTests {
     }
     
     @Test("OAuth transport convenience factory - client credentials")
-    func testClientCredentialsFactory() {
-        let transport = OAuthHTTPClientTransport.clientCredentials(
+    func testClientCredentialsFactory() throws {
+        let transport = try OAuthHTTPClientTransport.clientCredentials(
             endpoint: URL(string: "https://example.com/mcp")!,
             tokenEndpoint: URL(string: "https://example.com/token")!,
             clientId: "test-client",
@@ -42,8 +42,8 @@ struct OAuthHTTPTransportTests {
     }
     
     @Test("Authentication error detection")
-    func testAuthenticationErrorDetection() async {
-        let config = OAuthConfiguration(
+    func testAuthenticationErrorDetection() async throws {
+        let config = try OAuthConfiguration(
             authorizationEndpoint: URL(string: "https://example.com/auth")!,
             tokenEndpoint: URL(string: "https://example.com/token")!,
             clientId: "test-client",

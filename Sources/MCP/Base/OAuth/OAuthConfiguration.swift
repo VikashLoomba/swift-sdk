@@ -1,5 +1,20 @@
 import Foundation
 
+/// OAuth configuration validation errors
+public enum OAuthConfigurationError: Swift.Error, LocalizedError {
+    case publicClientWithSecret
+    case publicClientWithoutPKCE
+    
+    public var errorDescription: String? {
+        switch self {
+        case .publicClientWithSecret:
+            return "OAuth 2.1: Public clients cannot have a client secret"
+        case .publicClientWithoutPKCE:
+            return "OAuth 2.1: Public clients must use PKCE"
+        }
+    }
+}
+
 /// OAuth client types as defined in OAuth 2.1
 public enum OAuthClientType: Sendable {
     /// Confidential clients can maintain client secret securely
@@ -55,7 +70,7 @@ public struct OAuthConfiguration: Sendable {
         additionalParameters: [String: String]? = nil,
         usePKCE: Bool? = nil,
         pkceCodeChallengeMethod: PKCECodeChallengeMethod = .S256
-    ) {
+    ) throws {
         self.authorizationEndpoint = authorizationEndpoint
         self.tokenEndpoint = tokenEndpoint
         self.revocationEndpoint = revocationEndpoint
@@ -95,12 +110,12 @@ public struct OAuthConfiguration: Sendable {
         // Validate OAuth 2.1 requirements
         if self.clientType == .public && clientSecret != nil {
             // OAuth 2.1: Public clients MUST NOT use client secret
-            preconditionFailure("OAuth 2.1: Public clients cannot have a client secret")
+            throw OAuthConfigurationError.publicClientWithSecret
         }
         
         if self.clientType == .public && !self.usePKCE {
             // OAuth 2.1: Public clients MUST use PKCE
-            preconditionFailure("OAuth 2.1: Public clients must use PKCE")
+            throw OAuthConfigurationError.publicClientWithoutPKCE
         }
     }
 }
@@ -123,10 +138,10 @@ extension OAuthConfiguration {
         scopes: [String] = ["read:user"],
         redirectURI: URL? = nil,
         usePKCE: Bool? = nil
-    ) -> OAuthConfiguration {
+    ) throws -> OAuthConfiguration {
         let clientType: OAuthClientType = clientSecret != nil ? .confidential : .public
         
-        return OAuthConfiguration(
+        return try OAuthConfiguration(
             authorizationEndpoint: URL(string: "https://github.com/login/oauth/authorize")!,
             tokenEndpoint: URL(string: "https://github.com/login/oauth/access_token")!,
             revocationEndpoint: URL(string: "https://github.com/settings/connections/applications/\(clientId)")!,
@@ -146,10 +161,10 @@ extension OAuthConfiguration {
         scopes: [String] = ["openid", "profile", "email"],
         redirectURI: URL? = nil,
         usePKCE: Bool? = nil
-    ) -> OAuthConfiguration {
+    ) throws -> OAuthConfiguration {
         let clientType: OAuthClientType = clientSecret != nil ? .confidential : .public
         
-        return OAuthConfiguration(
+        return try OAuthConfiguration(
             authorizationEndpoint: URL(string: "https://accounts.google.com/o/oauth2/v2/auth")!,
             tokenEndpoint: URL(string: "https://oauth2.googleapis.com/token")!,
             revocationEndpoint: URL(string: "https://oauth2.googleapis.com/revoke")!,
@@ -170,10 +185,10 @@ extension OAuthConfiguration {
         scopes: [String] = ["User.Read"],
         redirectURI: URL? = nil,
         usePKCE: Bool? = nil
-    ) -> OAuthConfiguration {
+    ) throws -> OAuthConfiguration {
         let clientType: OAuthClientType = clientSecret != nil ? .confidential : .public
         
-        return OAuthConfiguration(
+        return try OAuthConfiguration(
             authorizationEndpoint: URL(string: "https://login.microsoftonline.com/\(tenantId)/oauth2/v2.0/authorize")!,
             tokenEndpoint: URL(string: "https://login.microsoftonline.com/\(tenantId)/oauth2/v2.0/token")!,
             revocationEndpoint: URL(string: "https://login.microsoftonline.com/\(tenantId)/oauth2/v2.0/logout")!,
@@ -195,8 +210,8 @@ extension OAuthConfiguration {
         scopes: [String] = [],
         redirectURI: URL,
         additionalParameters: [String: String]? = nil
-    ) -> OAuthConfiguration {
-        return OAuthConfiguration(
+    ) throws -> OAuthConfiguration {
+        return try OAuthConfiguration(
             authorizationEndpoint: authorizationEndpoint,
             tokenEndpoint: tokenEndpoint,
             revocationEndpoint: revocationEndpoint,
@@ -222,8 +237,8 @@ extension OAuthConfiguration {
         redirectURI: URL? = nil,
         additionalParameters: [String: String]? = nil,
         usePKCE: Bool = false
-    ) -> OAuthConfiguration {
-        return OAuthConfiguration(
+    ) throws -> OAuthConfiguration {
+        return try OAuthConfiguration(
             authorizationEndpoint: authorizationEndpoint,
             tokenEndpoint: tokenEndpoint,
             revocationEndpoint: revocationEndpoint,

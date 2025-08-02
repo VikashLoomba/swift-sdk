@@ -7,8 +7,8 @@ import Foundation
 struct OAuth21PKCETests {
     
     @Test("PKCE state generation")
-    func testPKCEStateGeneration() async {
-        let config = OAuthConfiguration.publicClient(
+    func testPKCEStateGeneration() async throws {
+        let config = try OAuthConfiguration.publicClient(
             authorizationEndpoint: URL(string: "https://example.com/auth")!,
             tokenEndpoint: URL(string: "https://example.com/token")!,
             clientId: "test-client",
@@ -41,7 +41,7 @@ struct OAuth21PKCETests {
     
     @Test("Authorization URL generation with PKCE")
     func testAuthorizationURLGenerationWithPKCE() async throws {
-        let config = OAuthConfiguration.publicClient(
+        let config = try OAuthConfiguration.publicClient(
             authorizationEndpoint: URL(string: "https://example.com/auth")!,
             tokenEndpoint: URL(string: "https://example.com/token")!,
             clientId: "test-client",
@@ -73,8 +73,8 @@ struct OAuth21PKCETests {
     }
     
     @Test("Authorization URL generation without redirect URI fails")
-    func testAuthorizationURLGenerationWithoutRedirectURIFails() async {
-        let config = OAuthConfiguration(
+    func testAuthorizationURLGenerationWithoutRedirectURIFails() async throws {
+        let config = try OAuthConfiguration(
             authorizationEndpoint: URL(string: "https://example.com/auth")!,
             tokenEndpoint: URL(string: "https://example.com/token")!,
             clientId: "test-client",
@@ -96,8 +96,8 @@ struct OAuth21PKCETests {
     }
     
     @Test("PKCE code verifier uniqueness")
-    func testPKCECodeVerifierUniqueness() async {
-        let config = OAuthConfiguration.publicClient(
+    func testPKCECodeVerifierUniqueness() async throws {
+        let config = try OAuthConfiguration.publicClient(
             authorizationEndpoint: URL(string: "https://example.com/auth")!,
             tokenEndpoint: URL(string: "https://example.com/token")!,
             clientId: "test-client",
@@ -125,8 +125,8 @@ struct OAuth21PKCETests {
     }
     
     @Test("Client credentials flow rejected for public clients")
-    func testClientCredentialsFlowRejectedForPublicClients() async {
-        let config = OAuthConfiguration.publicClient(
+    func testClientCredentialsFlowRejectedForPublicClients() async throws {
+        let config = try OAuthConfiguration.publicClient(
             authorizationEndpoint: URL(string: "https://example.com/auth")!,
             tokenEndpoint: URL(string: "https://example.com/token")!,
             clientId: "test-public-client",
