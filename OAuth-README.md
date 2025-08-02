@@ -1,27 +1,52 @@
-# OAuth Support for MCP Swift SDK
+# OAuth 2.0/2.1 Support for MCP Swift SDK
 
-The MCP Swift SDK now includes comprehensive OAuth 2.0 support for remote client transports, enabling secure authentication with OAuth-protected MCP servers.
+The MCP Swift SDK includes comprehensive OAuth 2.0 and OAuth 2.1 support for remote client transports, enabling secure authentication with OAuth-protected MCP servers.
 
 ## Features
 
-- **OAuth 2.0 Support**: Client credentials and authorization code flows
-- **Token Management**: Automatic token refresh, expiration checking, and secure storage
-- **Platform Integration**: Keychain storage on Apple platforms, encrypted file storage on Linux
-- **Provider Presets**: Built-in configurations for GitHub, Google, and Microsoft
-- **Seamless Integration**: Drop-in replacement for existing HTTP transports
+### 🔐 OAuth 2.0/2.1 Flows
+- **Client Credentials Flow**: Server-to-server authentication (confidential clients)
+- **Authorization Code Flow**: User-based authentication with PKCE support
+- **OAuth 2.1 Compliance**: Mandatory PKCE for public clients per specification
+
+### 🛡️ PKCE (Proof Key for Code Exchange)
+- **Automatic PKCE**: Required for public clients, optional for confidential clients
+- **Secure Code Generation**: Cryptographically secure code verifiers and challenges
+- **Platform Compatibility**: SHA256 with fallback to plain method when crypto unavailable
+
+### 🎫 Advanced Token Management
+- **Automatic Refresh**: Tokens are refreshed automatically when expired (60-second buffer)
+- **Thread-Safe Operations**: Concurrent token refresh requests are deduplicated
+- **Expiration Handling**: Built-in token expiration checking and validation
+- **JSON Serialization**: Tokens can be persisted and restored across app sessions
+
+### 💾 Platform-Specific Secure Storage
+- **Apple Platforms**: Keychain storage with access group support
+- **Linux**: Encrypted file-based storage with filename sanitization  
+- **Testing**: In-memory storage for unit tests and development
+
+### 🏭 Provider Presets
+- **GitHub**: OAuth 2.1 compliant with public/confidential client support
+- **Google**: OAuth 2.0/2.1 endpoints with PKCE support
+- **Microsoft**: Azure AD v2.0 with tenant configuration
+- **Custom Providers**: Generic factory methods for any OAuth 2.1 provider
 
 ## Quick Start
 
-### Basic OAuth Setup
+### OAuth 2.1 Public Client (Recommended)
+
+For mobile apps, SPAs, and other public clients that cannot securely store secrets:
 
 ```swift
 import MCP
 
-// Configure OAuth for your provider
-let oauthConfig = OAuthConfiguration.github(
-    clientId: "your-github-client-id",
-    clientSecret: "your-github-client-secret",
-    scopes: ["repo", "read:user"]
+// OAuth 2.1 public client with mandatory PKCE
+let oauthConfig = OAuthConfiguration.publicClient(
+    authorizationEndpoint: URL(string: "https://oauth.provider.com/authorize")!,
+    tokenEndpoint: URL(string: "https://oauth.provider.com/token")!,
+    clientId: "your-public-client-id",
+    scopes: ["read", "write"],
+    redirectURI: URL(string: "yourapp://oauth/redirect")!
 )
 
 // Create OAuth-enabled transport
@@ -30,13 +55,67 @@ let transport = OAuthHTTPClientTransport(
     oauthConfig: oauthConfig
 )
 
+// Generate PKCE state and authorization URL
+let authenticator = OAuthAuthenticator(configuration: oauthConfig)
+let pkceState = await authenticator.generatePKCEState()
+let authURL = try await authenticator.generateAuthorizationURL(pkceState: pkceState)
+
+// Direct user to authURL, then exchange the received code:
+let token = try await authenticator.exchangeAuthorizationCode(
+    code: receivedAuthCode,
+    pkceState: pkceState,
+    receivedState: receivedState
+)
+
 // Use with MCP client - OAuth is handled transparently
 let client = Client(name: "MyApp", version: "1.0.0")
 try await client.connect(transport: transport)
-
-// All requests now include OAuth authentication automatically
-let tools = try await client.listTools()
 ```
+
+### OAuth 2.1 Provider Presets
+
+#### GitHub Public Client
+```swift
+let githubConfig = OAuthConfiguration.github(
+    clientId: "your-github-client-id",
+    scopes: ["repo", "read:user"],
+    redirectURI: URL(string: "yourapp://github/callback")!
+)
+```
+
+#### Google Public Client  
+```swift
+let googleConfig = OAuthConfiguration.google(
+    clientId: "your-google-client-id.apps.googleusercontent.com",
+    scopes: ["openid", "profile", "email"],
+    redirectURI: URL(string: "yourapp://google/callback")!
+)
+```
+
+#### Microsoft Public Client
+```swift
+let microsoftConfig = OAuthConfiguration.microsoft(
+    clientId: "your-azure-client-id",
+    tenantId: "your-tenant-id", // or "common" for multi-tenant
+    scopes: ["User.Read", "Mail.Read"],
+    redirectURI: URL(string: "yourapp://microsoft/callback")!
+)
+```
+
+### OAuth 2.0 Confidential Client
+
+For server applications that can securely store client secrets:
+
+```swift
+// Traditional OAuth 2.0 with client secret
+let oauthConfig = OAuthConfiguration.confidentialClient(
+    authorizationEndpoint: URL(string: "https://oauth.provider.com/authorize")!,
+    tokenEndpoint: URL(string: "https://oauth.provider.com/token")!,
+    clientId: "your-confidential-client-id",
+    clientSecret: "your-client-secret",
+    scopes: ["api:read", "api:write"],
+    usePKCE: true // Optional for confidential clients
+)
 
 ### Client Credentials Flow
 
@@ -181,12 +260,59 @@ do {
 }
 ```
 
+## OAuth 2.1 Compliance
+
+The SDK implements OAuth 2.1 best practices and security requirements:
+
+### 🔒 Public Client Requirements
+- **Mandatory PKCE**: OAuth 2.1 requires PKCE for all public clients
+- **No Client Secrets**: Public clients cannot use client secrets
+- **S256 Code Challenge**: Uses SHA256-based code challenges when available
+
+### 🛡️ Security Enhancements
+- **State Parameter**: Automatic CSRF protection with cryptographic state validation
+- **Code Verifier**: 128-character cryptographically secure code verifiers
+- **Platform Adaptation**: Automatic fallback to plain PKCE when crypto libraries unavailable
+
+### 🔄 Automatic Client Type Detection
+```swift
+// Automatically detected as public client (no secret)
+let publicConfig = OAuthConfiguration.github(
+    clientId: "github-client-id",
+    scopes: ["repo"]
+    // usePKCE automatically set to true
+)
+
+// Automatically detected as confidential client (has secret) 
+let confidentialConfig = OAuthConfiguration.github(
+    clientId: "github-client-id",
+    clientSecret: "github-client-secret",
+    scopes: ["repo"]
+    // usePKCE defaults to false but can be enabled
+)
+```
+
+### 🚫 OAuth 2.1 Validation
+The SDK enforces OAuth 2.1 compliance rules:
+- Public clients cannot have client secrets
+- Public clients must use PKCE
+- Client credentials flow is restricted to confidential clients
+
 ## Security Considerations
 
-- **Secure Storage**: Tokens are stored securely using platform-appropriate mechanisms
-- **Token Rotation**: Refresh tokens are used to obtain new access tokens
-- **Minimal Scopes**: Only request the scopes your application needs
-- **HTTPS Only**: All OAuth communication uses HTTPS
+### 🔐 Enhanced Security Features
+- **Secure Storage**: Platform-appropriate secure token storage (Keychain/encrypted files)
+- **Token Rotation**: Automatic refresh token usage for new access tokens
+- **State Validation**: CSRF protection through state parameter verification
+- **PKCE Protection**: Code injection attack prevention via PKCE
+- **Minimal Scopes**: Request only necessary OAuth scopes
+- **HTTPS Enforcement**: All OAuth communication uses secure connections
+- **Thread Safety**: Actor-isolated operations for concurrent safety
+
+### 🎯 Platform Compatibility
+- **Apple Platforms**: Full CryptoKit support for S256 PKCE
+- **Linux**: Automatic fallback to plain PKCE when crypto unavailable
+- **Cross-Platform**: Consistent API across all supported platforms
 
 ## Migration from HTTP Transport
 
