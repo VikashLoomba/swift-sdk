@@ -345,13 +345,31 @@ struct ClientTests {
 
         let request1 = Ping.request()
         let request2 = Ping.request()
-        var resultTask1: Task<Ping.Result, Swift.Error>?
-        var resultTask2: Task<Ping.Result, Swift.Error>?
-
-        try await client.withBatch { batch in
-            resultTask1 = try await batch.addRequest(request1)
-            resultTask2 = try await batch.addRequest(request2)
+        
+        actor TaskCapture {
+            var task1: Task<Ping.Result, Swift.Error>?
+            var task2: Task<Ping.Result, Swift.Error>?
+            
+            func setTask1(_ task: Task<Ping.Result, Swift.Error>) {
+                self.task1 = task
+            }
+            
+            func setTask2(_ task: Task<Ping.Result, Swift.Error>) {
+                self.task2 = task
+            }
         }
+        
+        let taskCapture = TaskCapture()
+        
+        try await client.withBatch { batch in
+            let t1 = try await batch.addRequest(request1)
+            let t2 = try await batch.addRequest(request2)
+            await taskCapture.setTask1(t1)
+            await taskCapture.setTask2(t2)
+        }
+        
+        let resultTask1 = await taskCapture.task1
+        let resultTask2 = await taskCapture.task2
 
         // Check if batch message was sent (after initialize and initialized notification)
         let sentMessages = await transport.sentMessages
@@ -426,12 +444,24 @@ struct ClientTests {
         let request1 = Ping.request()  // Success
         let request2 = Ping.request()  // Error
 
-        var resultTasks: [Task<Ping.Result, Swift.Error>] = []
-
-        try await client.withBatch { batch in
-            resultTasks.append(try await batch.addRequest(request1))
-            resultTasks.append(try await batch.addRequest(request2))
+        actor TasksCapture {
+            var tasks: [Task<Ping.Result, Swift.Error>] = []
+            
+            func addTask(_ task: Task<Ping.Result, Swift.Error>) {
+                tasks.append(task)
+            }
         }
+        
+        let tasksCapture = TasksCapture()
+        
+        try await client.withBatch { batch in
+            let t1 = try await batch.addRequest(request1)
+            let t2 = try await batch.addRequest(request2)
+            await tasksCapture.addTask(t1)
+            await tasksCapture.addTask(t2)
+        }
+        
+        let resultTasks = await tasksCapture.tasks
 
         // Check if batch message was sent (after initialize and initialized notification)
         #expect(await transport.sentMessages.count == 3)  // Initialize request + Initialized notification + Batch
