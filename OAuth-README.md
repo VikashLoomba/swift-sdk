@@ -7,6 +7,7 @@ The MCP Swift SDK includes comprehensive OAuth 2.0 and OAuth 2.1 support for rem
 ### 🔐 OAuth 2.0/2.1 Flows
 - **Client Credentials Flow**: Server-to-server authentication (confidential clients)
 - **Authorization Code Flow**: User-based authentication with PKCE support
+- **Dynamic Client Registration**: Automatic client registration per RFC 7591
 - **OAuth 2.1 Compliance**: Mandatory PKCE for public clients per specification
 
 ### 🛡️ PKCE (Proof Key for Code Exchange)
@@ -30,6 +31,7 @@ The MCP Swift SDK includes comprehensive OAuth 2.0 and OAuth 2.1 support for rem
 - **Google**: OAuth 2.0/2.1 endpoints with PKCE support
 - **Microsoft**: Azure AD v2.0 with tenant configuration
 - **Custom Providers**: Generic factory methods for any OAuth 2.1 provider
+- **Dynamic Registration**: Automatic client registration with any compliant server
 
 ## Quick Start
 
@@ -116,6 +118,155 @@ let oauthConfig = OAuthConfiguration.confidentialClient(
     scopes: ["api:read", "api:write"],
     usePKCE: true // Optional for confidential clients
 )
+```
+
+## OAuth 2.0 Dynamic Client Registration
+
+The SDK supports OAuth 2.0 Dynamic Client Registration (RFC 7591), allowing applications to automatically register as OAuth clients at runtime, eliminating the need for hardcoded `client_id` values.
+
+### Discovery + Registration Flow
+
+For the complete automated flow:
+
+```swift
+let authenticator = OAuthAuthenticator(
+    configuration: try OAuthConfiguration(
+        authorizationEndpoint: URL(string: "https://oauth.provider.com/authorize")!,
+        tokenEndpoint: URL(string: "https://oauth.provider.com/token")!,
+        clientId: "temporary-id", // Will be replaced
+        scopes: []
+    )
+)
+
+// Perform discovery and registration in one step
+let config = try await authenticator.setupOAuthWithDiscovery(
+    discoveryURL: URL(string: "https://oauth.provider.com/.well-known/oauth-authorization-server")!,
+    clientName: "My Dynamic App",
+    redirectURIs: [URL(string: "https://myapp.example.com/callback")!],
+    scopes: ["read", "write"]
+)
+
+// Use the dynamically configured OAuth transport
+let transport = OAuthHTTPClientTransport(
+    endpoint: URL(string: "https://mcp-server.example.com")!,
+    oauthConfig: config
+)
+
+let client = Client(name: "MyApp", version: "1.0.0")
+try await client.connect(transport: transport)
+```
+
+### Manual Registration Steps
+
+For more control over the registration process:
+
+```swift
+// 1. Fetch discovery document
+let discoveryURL = URL(string: "https://oauth.provider.com/.well-known/oauth-authorization-server")!
+let discovery = try await authenticator.fetchDiscoveryDocument(from: discoveryURL)
+
+// 2. Register client if registration endpoint exists
+if let registrationEndpoint = discovery.registrationEndpoint {
+    let registration = try await authenticator.registerClient(
+        registrationEndpoint: registrationEndpoint,
+        clientName: "My Dynamic App",
+        redirectURIs: [URL(string: "https://myapp.example.com/callback")!],
+        grantTypes: ["authorization_code"],
+        responseTypes: ["code"],
+        scopes: ["read", "write"],
+        softwareId: "myapp-v1",
+        softwareVersion: "1.0.0"
+    )
+    
+    // 3. Create configuration from registration
+    let config = try OAuthConfiguration.fromDynamicRegistration(
+        authorizationEndpoint: discovery.authorizationEndpoint,
+        tokenEndpoint: discovery.tokenEndpoint,
+        revocationEndpoint: discovery.revocationEndpoint,
+        registrationResponse: registration,
+        scopes: ["read", "write"]
+    )
+}
+```
+
+### Discovery Endpoints
+
+Common discovery endpoint patterns:
+
+```swift
+// OAuth 2.0 Authorization Server Metadata (RFC 8414)
+let oauthDiscovery = URL(string: "https://oauth.provider.com/.well-known/oauth-authorization-server")!
+
+// OpenID Connect Discovery
+let oidcDiscovery = URL(string: "https://oauth.provider.com/.well-known/openid_configuration")!
+```
+
+### Registration Request Parameters
+
+The `registerClient` method supports all standard RFC 7591 parameters:
+
+```swift
+let registration = try await authenticator.registerClient(
+    registrationEndpoint: registrationEndpoint,
+    clientName: "My App",                    // Human-readable name
+    redirectURIs: [callbackURL],             // Required redirect URIs
+    grantTypes: ["authorization_code"],      // OAuth grant types
+    responseTypes: ["code"],                 // OAuth response types  
+    scopes: ["read", "write"],              // Requested scopes
+    softwareId: "myapp-v1",                 // Software identifier
+    softwareVersion: "1.0.0"                // Software version
+)
+```
+
+### Registration Response
+
+The server returns a `ClientRegistrationResponse` with the registered client details:
+
+```swift
+public struct ClientRegistrationResponse {
+    let clientId: String                    // Generated client ID
+    let clientSecret: String?               // Client secret (confidential clients)
+    let clientIdIssuedAt: Int?             // Issuance timestamp
+    let clientSecretExpiresAt: Int?        // Expiration timestamp
+    let redirectUris: [String]             // Registered redirect URIs
+    let grantTypes: [String]               // Allowed grant types
+    let responseTypes: [String]            // Allowed response types
+    let scopes: String?                    // Granted scopes
+    let clientName: String?                // Client display name
+    let softwareId: String?                // Software identifier
+    let softwareVersion: String?           // Software version
+}
+```
+
+### Benefits of Dynamic Registration
+
+- **No hardcoded client credentials**: Each app instance gets unique credentials
+- **Better security**: Eliminates shared client secrets across deployments
+- **Simplified deployment**: No manual registration step required
+- **Unique client tracking**: Each installation can be tracked separately
+- **Environment flexibility**: Works across development, staging, and production
+- **Standards compliance**: Follows RFC 7591 specification
+
+### Error Handling
+
+Dynamic registration adds several new error cases:
+
+```swift
+do {
+    let config = try await authenticator.setupOAuthWithDiscovery(...)
+} catch OAuthError.registrationEndpointNotFound {
+    // Server doesn't support dynamic registration
+    // Fall back to static client registration
+} catch OAuthError.clientRegistrationFailed(let status, let message) {
+    // Registration request failed
+    print("Registration failed: \(status) - \(message)")
+} catch OAuthError.invalidDiscoveryDocument(let error) {
+    // Discovery document parsing failed
+    print("Discovery error: \(error)")
+} catch {
+    // Handle other errors
+}
+```
 
 ### Client Credentials Flow
 
