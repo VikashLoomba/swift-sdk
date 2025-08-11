@@ -568,7 +568,7 @@ public actor OAuthAuthenticator {
             )
         } catch {
             logger.error("Failed to decode token response", metadata: ["error": "\(error)"])
-            throw OAuthError.invalidTokenResponse(error.localizedDescription)
+            throw OAuthError.invalidTokenResponse("Failed to decode token response")
         }
     }
     
