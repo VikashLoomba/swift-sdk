@@ -269,19 +269,16 @@ extension OAuthConfiguration {
             throw OAuthConfigurationError.invalidRedirectURI
         }
         
-        let clientType: OAuthClientType = registrationResponse.clientSecret != nil ? .confidential : .public
-        
+        // Let the OAuthConfiguration initializer automatically determine clientType and usePKCE
+        // based on the presence of clientSecret (OAuth 2.1 automatic client type detection)
         return try OAuthConfiguration(
             authorizationEndpoint: authorizationEndpoint,
             tokenEndpoint: tokenEndpoint,
             revocationEndpoint: revocationEndpoint,
             clientId: registrationResponse.clientId,
             clientSecret: registrationResponse.clientSecret,
-            clientType: clientType,
-            scopes: scopes,
-            redirectURI: redirectURI,
-            usePKCE: clientType == .public, // OAuth 2.1 mandates PKCE for public clients
-            pkceCodeChallengeMethod: .S256
+            scopes: scopes.isEmpty ? (registrationResponse.scopes?.split(separator: " ").map(String.init) ?? []) : scopes,
+            redirectURI: redirectURI
         )
     }
 }
