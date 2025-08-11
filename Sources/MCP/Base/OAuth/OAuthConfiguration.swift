@@ -4,6 +4,7 @@ import Foundation
 public enum OAuthConfigurationError: Swift.Error, LocalizedError {
     case publicClientWithSecret
     case publicClientWithoutPKCE
+    case invalidRedirectURI
     
     public var errorDescription: String? {
         switch self {
@@ -11,6 +12,8 @@ public enum OAuthConfigurationError: Swift.Error, LocalizedError {
             return "OAuth 2.1: Public clients cannot have a client secret"
         case .publicClientWithoutPKCE:
             return "OAuth 2.1: Public clients must use PKCE"
+        case .invalidRedirectURI:
+            return "Invalid redirect URI in client registration response"
         }
     }
 }
@@ -249,6 +252,35 @@ extension OAuthConfiguration {
             redirectURI: redirectURI,
             additionalParameters: additionalParameters,
             usePKCE: usePKCE,
+            pkceCodeChallengeMethod: .S256
+        )
+    }
+    
+    /// Create OAuth configuration from dynamic client registration response
+    public static func fromDynamicRegistration(
+        authorizationEndpoint: URL,
+        tokenEndpoint: URL,
+        revocationEndpoint: URL? = nil,
+        registrationResponse: ClientRegistrationResponse,
+        scopes: [String] = []
+    ) throws -> OAuthConfiguration {
+        guard let firstRedirectURI = registrationResponse.redirectUris.first,
+              let redirectURI = URL(string: firstRedirectURI) else {
+            throw OAuthConfigurationError.invalidRedirectURI
+        }
+        
+        let clientType: OAuthClientType = registrationResponse.clientSecret != nil ? .confidential : .public
+        
+        return try OAuthConfiguration(
+            authorizationEndpoint: authorizationEndpoint,
+            tokenEndpoint: tokenEndpoint,
+            revocationEndpoint: revocationEndpoint,
+            clientId: registrationResponse.clientId,
+            clientSecret: registrationResponse.clientSecret,
+            clientType: clientType,
+            scopes: scopes,
+            redirectURI: redirectURI,
+            usePKCE: clientType == .public, // OAuth 2.1 mandates PKCE for public clients
             pkceCodeChallengeMethod: .S256
         )
     }

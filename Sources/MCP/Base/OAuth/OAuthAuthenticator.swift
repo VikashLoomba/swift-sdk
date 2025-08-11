@@ -318,6 +318,148 @@ public actor OAuthAuthenticator {
         }
     }
     
+    // MARK: - OAuth 2.0 Dynamic Client Registration (RFC 7591)
+    
+    /// Fetch OAuth 2.0 Authorization Server Metadata (RFC 8414)
+    public func fetchDiscoveryDocument(from discoveryURL: URL) async throws -> OAuthDiscoveryDocument {
+        logger.info("Fetching OAuth discovery document", metadata: ["url": "\(discoveryURL.absoluteString)"])
+        
+        var request = URLRequest(url: discoveryURL)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        
+        let (data, response) = try await urlSession.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw OAuthError.invalidResponse
+        }
+        
+        guard 200..<300 ~= httpResponse.statusCode else {
+            let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
+            logger.error("Discovery document request failed", metadata: [
+                "statusCode": "\(httpResponse.statusCode)",
+                "error": "\(errorBody)"
+            ])
+            throw OAuthError.clientRegistrationFailed(httpResponse.statusCode, errorBody)
+        }
+        
+        do {
+            let discoveryDocument = try JSONDecoder().decode(OAuthDiscoveryDocument.self, from: data)
+            logger.info("Successfully fetched discovery document")
+            return discoveryDocument
+        } catch {
+            logger.error("Failed to decode discovery document", metadata: ["error": "\(error)"])
+            throw OAuthError.invalidDiscoveryDocument(error.localizedDescription)
+        }
+    }
+    
+    /// Register a new OAuth client dynamically using RFC 7591
+    public func registerClient(
+        registrationEndpoint: URL,
+        clientName: String,
+        redirectURIs: [URL],
+        grantTypes: [String] = ["authorization_code"],
+        responseTypes: [String] = ["code"],
+        scopes: [String]? = nil,
+        softwareId: String? = nil,
+        softwareVersion: String? = nil
+    ) async throws -> ClientRegistrationResponse {
+        logger.info("Registering OAuth client dynamically", metadata: [
+            "endpoint": "\(registrationEndpoint.absoluteString)",
+            "clientName": "\(clientName)"
+        ])
+        
+        var request = URLRequest(url: registrationEndpoint)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        
+        var registrationRequest: [String: Any] = [
+            "client_name": clientName,
+            "redirect_uris": redirectURIs.map { $0.absoluteString },
+            "grant_types": grantTypes,
+            "response_types": responseTypes
+        ]
+        
+        if let scopes = scopes {
+            registrationRequest["scope"] = scopes.joined(separator: " ")
+        }
+        
+        if let softwareId = softwareId {
+            registrationRequest["software_id"] = softwareId
+        }
+        
+        if let softwareVersion = softwareVersion {
+            registrationRequest["software_version"] = softwareVersion
+        }
+        
+        do {
+            request.httpBody = try JSONSerialization.data(withJSONObject: registrationRequest)
+        } catch {
+            throw OAuthError.invalidClientRegistrationResponse(error.localizedDescription)
+        }
+        
+        let (data, response) = try await urlSession.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw OAuthError.invalidResponse
+        }
+        
+        guard 200..<300 ~= httpResponse.statusCode else {
+            let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
+            logger.error("Client registration failed", metadata: [
+                "statusCode": "\(httpResponse.statusCode)",
+                "error": "\(errorBody)"
+            ])
+            throw OAuthError.clientRegistrationFailed(httpResponse.statusCode, errorBody)
+        }
+        
+        do {
+            let registrationResponse = try JSONDecoder().decode(ClientRegistrationResponse.self, from: data)
+            logger.info("Client registration successful", metadata: [
+                "clientId": "\(registrationResponse.clientId)"
+            ])
+            return registrationResponse
+        } catch {
+            logger.error("Failed to decode client registration response", metadata: ["error": "\(error)"])
+            throw OAuthError.invalidClientRegistrationResponse(error.localizedDescription)
+        }
+    }
+    
+    /// Perform OAuth discovery and dynamic client registration in one step
+    public func setupOAuthWithDiscovery(
+        discoveryURL: URL,
+        clientName: String,
+        redirectURIs: [URL],
+        scopes: [String]
+    ) async throws -> OAuthConfiguration {
+        logger.info("Setting up OAuth with discovery and dynamic registration")
+        
+        // 1. Fetch discovery document
+        let discovery = try await fetchDiscoveryDocument(from: discoveryURL)
+        
+        // 2. Register client if registration endpoint exists
+        guard let registrationEndpoint = discovery.registrationEndpoint else {
+            throw OAuthError.registrationEndpointNotFound
+        }
+        
+        let registration = try await registerClient(
+            registrationEndpoint: registrationEndpoint,
+            clientName: clientName,
+            redirectURIs: redirectURIs,
+            scopes: scopes
+        )
+        
+        // 3. Create configuration from registration
+        return try OAuthConfiguration.fromDynamicRegistration(
+            authorizationEndpoint: discovery.authorizationEndpoint,
+            tokenEndpoint: discovery.tokenEndpoint,
+            revocationEndpoint: discovery.revocationEndpoint,
+            registrationResponse: registration,
+            scopes: scopes
+        )
+    }
+    
     // MARK: - Private Methods
     
     /// Generate a cryptographically secure code verifier for PKCE
@@ -485,8 +627,100 @@ private struct TokenResponse: Codable {
     let scope: String?
 }
 
+/// OAuth 2.0 Discovery Document as per RFC 8414
+public struct OAuthDiscoveryDocument: Codable {
+    /// The authorization server's issuer identifier
+    public let issuer: String?
+    
+    /// URL of the authorization endpoint
+    public let authorizationEndpoint: URL
+    
+    /// URL of the token endpoint
+    public let tokenEndpoint: URL
+    
+    /// URL of the registration endpoint (optional, used for dynamic client registration)
+    public let registrationEndpoint: URL?
+    
+    /// URL of the revocation endpoint (optional)
+    public let revocationEndpoint: URL?
+    
+    /// JSON array of supported scopes
+    public let scopesSupported: [String]?
+    
+    /// JSON array of supported response types
+    public let responseTypesSupported: [String]?
+    
+    /// JSON array of supported grant types
+    public let grantTypesSupported: [String]?
+    
+    /// JSON array of supported code challenge methods for PKCE
+    public let codeChallengeMethodsSupported: [String]?
+    
+    enum CodingKeys: String, CodingKey {
+        case issuer
+        case authorizationEndpoint = "authorization_endpoint"
+        case tokenEndpoint = "token_endpoint"
+        case registrationEndpoint = "registration_endpoint"
+        case revocationEndpoint = "revocation_endpoint"
+        case scopesSupported = "scopes_supported"
+        case responseTypesSupported = "response_types_supported"
+        case grantTypesSupported = "grant_types_supported"
+        case codeChallengeMethodsSupported = "code_challenge_methods_supported"
+    }
+}
+
+/// OAuth 2.0 Dynamic Client Registration Response as per RFC 7591
+public struct ClientRegistrationResponse: Codable {
+    /// The client identifier issued by the authorization server
+    public let clientId: String
+    
+    /// The client secret issued by the authorization server (optional for public clients)
+    public let clientSecret: String?
+    
+    /// The time at which the client identifier was issued
+    public let clientIdIssuedAt: Int?
+    
+    /// The time at which the client secret will expire (if issued)
+    public let clientSecretExpiresAt: Int?
+    
+    /// Array of redirect URIs for the client
+    public let redirectUris: [String]
+    
+    /// Array of OAuth grant types that the client can use
+    public let grantTypes: [String]
+    
+    /// Array of OAuth response types that the client can use
+    public let responseTypes: [String]
+    
+    /// Space-separated list of scopes the client can request
+    public let scopes: String?
+    
+    /// Client name for human display
+    public let clientName: String?
+    
+    /// URL of the client's software version or software statement
+    public let softwareId: String?
+    
+    /// Version of the client software
+    public let softwareVersion: String?
+    
+    enum CodingKeys: String, CodingKey {
+        case clientId = "client_id"
+        case clientSecret = "client_secret"
+        case clientIdIssuedAt = "client_id_issued_at"
+        case clientSecretExpiresAt = "client_secret_expires_at"
+        case redirectUris = "redirect_uris"
+        case grantTypes = "grant_types"
+        case responseTypes = "response_types"
+        case scopes = "scope"
+        case clientName = "client_name"
+        case softwareId = "software_id"
+        case softwareVersion = "software_version"
+    }
+}
+
 /// OAuth-related errors
-public enum OAuthError: Swift.Error, LocalizedError {
+public enum OAuthError: Swift.Error, LocalizedError, Equatable {
     case authenticationRequired
     case clientSecretRequired
     case clientCredentialsNotAllowedForPublicClients
@@ -496,7 +730,11 @@ public enum OAuthError: Swift.Error, LocalizedError {
     case refreshTokenNotAvailable
     case invalidResponse
     case tokenRequestFailed(Int, String)
-    case invalidTokenResponse(Swift.Error)
+    case invalidTokenResponse(String)
+    case registrationEndpointNotFound
+    case clientRegistrationFailed(Int, String)
+    case invalidDiscoveryDocument(String)
+    case invalidClientRegistrationResponse(String)
     
     public var errorDescription: String? {
         switch self {
@@ -519,7 +757,15 @@ public enum OAuthError: Swift.Error, LocalizedError {
         case .tokenRequestFailed(let statusCode, let body):
             return "Token request failed with status \(statusCode): \(body)"
         case .invalidTokenResponse(let error):
-            return "Invalid token response: \(error.localizedDescription)"
+            return "Invalid token response: \(error)"
+        case .registrationEndpointNotFound:
+            return "Registration endpoint not found in discovery document"
+        case .clientRegistrationFailed(let statusCode, let body):
+            return "Client registration failed with status \(statusCode): \(body)"
+        case .invalidDiscoveryDocument(let error):
+            return "Invalid discovery document: \(error)"
+        case .invalidClientRegistrationResponse(let error):
+            return "Invalid client registration response: \(error)"
         }
     }
 }
