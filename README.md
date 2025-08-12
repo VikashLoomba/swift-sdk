@@ -134,6 +134,43 @@ for item in content {
 }
 ```
 
+#### Tools with Progress Tracking
+
+For long-running tool operations, you can track progress:
+
+```swift
+// Register a progress handler
+await client.onProgress { token, progress, total in
+    if let total = total {
+        print("Progress [\(token)]: \(progress)/\(total) (\(Int(progress/total * 100))%)")
+    } else {
+        print("Progress [\(token)]: \(progress)")
+    }
+}
+
+// Call a tool with progress tracking
+let progressToken = client.createProgressToken()
+let result = try await client.callTool(
+    name: "large-file-processor",
+    arguments: ["file": "dataset.csv", "rows": 1000000],
+    progressToken: progressToken,
+    onProgress: { progress, total in
+        // Update UI with progress
+        updateProgressBar(current: progress, total: total)
+    }
+)
+
+// Or use the convenience wrapper
+let toolCall = ToolCallWithProgress(
+    name: "video-transcoder",
+    arguments: ["input": "movie.mp4", "quality": "high"]
+)
+
+let result = try await client.executeToolWithProgress(toolCall) { progress, total in
+    print("Transcoding: \(progress)/\(total ?? 0)")
+}
+```
+
 ### Resources
 
 Resources represent data that can be accessed and potentially subscribed to:
