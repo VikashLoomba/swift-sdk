@@ -361,6 +361,7 @@ public actor OAuthAuthenticator {
         grantTypes: [String] = ["authorization_code"],
         responseTypes: [String] = ["code"],
         scopes: [String]? = nil,
+        tokenEndpointAuthMethod: String = "none",
         softwareId: String? = nil,
         softwareVersion: String? = nil
     ) async throws -> ClientRegistrationResponse {
@@ -378,7 +379,8 @@ public actor OAuthAuthenticator {
             "client_name": clientName,
             "redirect_uris": redirectURIs.map { $0.absoluteString },
             "grant_types": grantTypes,
-            "response_types": responseTypes
+            "response_types": responseTypes,
+            "token_endpoint_auth_method": tokenEndpointAuthMethod
         ]
         
         if let scopes = scopes {
@@ -431,7 +433,8 @@ public actor OAuthAuthenticator {
         discoveryURL: URL,
         clientName: String,
         redirectURIs: [URL],
-        scopes: [String]
+        scopes: [String],
+        isPublicClient: Bool = true
     ) async throws -> OAuthConfiguration {
         logger.info("Setting up OAuth with discovery and dynamic registration")
         
@@ -447,7 +450,8 @@ public actor OAuthAuthenticator {
             registrationEndpoint: registrationEndpoint,
             clientName: clientName,
             redirectURIs: redirectURIs,
-            scopes: scopes
+            scopes: scopes,
+            tokenEndpointAuthMethod: isPublicClient ? "none" : "client_secret_post"
         )
         
         // 3. Create configuration from registration
@@ -628,7 +632,7 @@ private struct TokenResponse: Codable {
 }
 
 /// OAuth 2.0 Discovery Document as per RFC 8414
-public struct OAuthDiscoveryDocument: Codable {
+public struct OAuthDiscoveryDocument: Codable, Sendable {
     /// The authorization server's issuer identifier
     public let issuer: String?
     
@@ -670,7 +674,7 @@ public struct OAuthDiscoveryDocument: Codable {
 }
 
 /// OAuth 2.0 Dynamic Client Registration Response as per RFC 7591
-public struct ClientRegistrationResponse: Codable {
+public struct ClientRegistrationResponse: Codable, Sendable {
     /// The client identifier issued by the authorization server
     public let clientId: String
     
