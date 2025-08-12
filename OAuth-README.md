@@ -449,6 +449,50 @@ The SDK enforces OAuth 2.1 compliance rules:
 - Public clients must use PKCE
 - Client credentials flow is restricted to confidential clients
 
+### 🔧 Architectural Improvements
+
+Recent improvements to the OAuth transport eliminate common connection issues and improve performance:
+
+#### **Fixed "Transport Not Connected" Error**
+The transport now properly handles authenticated requests without creating unnecessary transport instances:
+
+```swift
+// Previous implementation had connection issues
+// Now fixed with session pooling approach
+let transport = OAuthHTTPClientTransport(
+    endpoint: URL(string: "https://server.com")!,
+    oauthConfig: oauthConfig
+)
+
+try await transport.connect()
+try await transport.send(data)  // Now works reliably
+```
+
+#### **Session Pool Implementation**
+```swift
+// Internal session pooling (automatically handled)
+private var authenticatedSessionPool: [String: URLSession] = [:]
+
+private func getOrCreateAuthenticatedSession(for token: OAuthToken) -> URLSession {
+    let sessionKey = token.accessToken
+    
+    if let existingSession = authenticatedSessionPool[sessionKey] {
+        return existingSession  // Reuse existing session
+    }
+    
+    // Create new session only when needed
+    let authenticatedSession = URLSession(configuration: configWithAuth)
+    authenticatedSessionPool[sessionKey] = authenticatedSession
+    return authenticatedSession
+}
+```
+
+#### **Automatic Cleanup**
+Sessions are automatically cleaned up to prevent resource leaks:
+- **On Disconnect**: All pooled sessions are invalidated
+- **On Token Refresh**: Old sessions are replaced with new ones
+- **On Error**: Failed sessions are removed from pool
+
 ## Security Considerations
 
 ### 🔐 Enhanced Security Features
@@ -464,6 +508,66 @@ The SDK enforces OAuth 2.1 compliance rules:
 - **Apple Platforms**: Full CryptoKit support for S256 PKCE
 - **Linux**: Automatic fallback to plain PKCE when crypto unavailable
 - **Cross-Platform**: Consistent API across all supported platforms
+
+## Performance & Architecture
+
+### 🚀 Session Pooling & Reuse
+
+The OAuth transport implements efficient session pooling to optimize performance and resource usage:
+
+#### **Efficient Session Management**
+- **Session Reuse**: Authenticated `URLSession` instances are pooled and reused based on access tokens
+- **No Transport Creation**: Eliminates the inefficient pattern of creating new `HTTPClientTransport` instances for each request
+- **Memory Efficient**: Automatic cleanup prevents session leaks and resource waste
+- **Connection Pooling**: HTTP connections are reused across requests with the same authentication
+
+#### **Architecture Benefits**
+```swift
+// ✅ Efficient Pattern (Current Implementation)
+// Sessions are automatically pooled and reused
+let transport = OAuthHTTPClientTransport(
+    endpoint: URL(string: "https://server.com")!,
+    oauthConfig: oauthConfig
+)
+
+// Multiple requests reuse the same authenticated session
+try await transport.send(request1)  // Creates session pool entry
+try await transport.send(request2)  // Reuses existing session
+try await transport.send(request3)  // Reuses existing session
+```
+
+#### **Session Lifecycle**
+1. **First Request**: Creates new authenticated session and adds to pool
+2. **Subsequent Requests**: Reuses session from pool for same access token
+3. **Token Refresh**: New session created for new token, old session cleaned up
+4. **Disconnect**: All pooled sessions are properly invalidated and cleaned up
+
+#### **Performance Impact**
+- **Reduced Latency**: Session reuse eliminates connection setup overhead
+- **Lower Memory Usage**: Single session per token instead of per request
+- **Better Throughput**: HTTP connection reuse improves request performance
+- **Resource Efficiency**: Proper cleanup prevents accumulation of unused sessions
+
+#### **Best Practices**
+```swift
+// ✅ Good: Reuse the same transport instance
+let transport = OAuthHTTPClientTransport(endpoint: serverURL, oauthConfig: config)
+try await transport.connect()
+
+for request in requests {
+    try await transport.send(request)  // Efficient session reuse
+}
+
+await transport.disconnect()  // Proper cleanup
+
+// ❌ Avoid: Creating new transport instances unnecessarily
+for request in requests {
+    let newTransport = OAuthHTTPClientTransport(endpoint: serverURL, oauthConfig: config)
+    try await newTransport.connect()
+    try await newTransport.send(request)  // Inefficient - no reuse
+    await newTransport.disconnect()
+}
+```
 
 ## Migration from HTTP Transport
 
