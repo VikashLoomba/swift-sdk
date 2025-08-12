@@ -449,6 +449,44 @@ The SDK enforces OAuth 2.1 compliance rules:
 - Public clients must use PKCE
 - Client credentials flow is restricted to confidential clients
 
+### 🔧 Architectural Improvements
+
+Recent improvements to the OAuth transport fix critical SSE authentication issues and simplify the architecture:
+
+#### **Full SSE Support for OAuth-Protected Servers**
+The transport now properly authenticates ALL requests, including Server-Sent Events (SSE):
+
+```swift
+// OAuth headers are automatically added to both POST and SSE GET requests
+let transport = OAuthHTTPClientTransport(
+    endpoint: URL(string: "https://server.com")!,
+    oauthConfig: oauthConfig
+)
+
+try await transport.connect()
+// Both regular requests and SSE streaming are authenticated
+try await transport.send(data)  // POST requests work
+let stream = transport.receive()  // SSE GET requests also authenticated
+```
+
+#### **Simplified Architecture**
+The OAuth transport uses a clean, maintainable approach:
+- **Single Transport**: One HTTPClientTransport with OAuth headers in URLSession configuration
+- **Automatic Authentication**: OAuth headers added to ALL requests via httpAdditionalHeaders
+- **Token Refresh**: Recreates transport with new authenticated session when token changes
+- **No Complex Pooling**: Removed unnecessary session/transport pooling complexity
+
+#### **How It Works**
+```swift
+// OAuth headers are baked into the URLSession configuration
+let config = URLSessionConfiguration.default
+config.httpAdditionalHeaders = ["Authorization": "Bearer \(token)"]
+let authenticatedSession = URLSession(configuration: config)
+
+// All requests through this session are authenticated
+// Including both POST (send) and GET (SSE receive) requests
+```
+
 ## Security Considerations
 
 ### 🔐 Enhanced Security Features
@@ -464,6 +502,66 @@ The SDK enforces OAuth 2.1 compliance rules:
 - **Apple Platforms**: Full CryptoKit support for S256 PKCE
 - **Linux**: Automatic fallback to plain PKCE when crypto unavailable
 - **Cross-Platform**: Consistent API across all supported platforms
+
+## Performance & Architecture
+
+### 🚀 Simplified OAuth Transport
+
+The OAuth transport provides secure authentication with a clean, maintainable architecture:
+
+#### **Key Features**
+- **Full SSE Support**: OAuth headers are added to ALL requests, including Server-Sent Events
+- **Automatic Token Management**: Handles token refresh transparently
+- **Simple Architecture**: Straightforward implementation without complex state management
+- **Correct Authentication**: All HTTP requests (POST, GET, SSE) include OAuth headers
+
+#### **How It Works**
+```swift
+// OAuth transport wraps HTTPClientTransport with authentication
+let transport = OAuthHTTPClientTransport(
+    endpoint: URL(string: "https://server.com")!,
+    oauthConfig: oauthConfig
+)
+
+// All requests are automatically authenticated
+try await transport.send(request1)  // Authenticated POST
+try await transport.send(request2)  // Authenticated POST
+let stream = transport.receive()    // Authenticated SSE GET
+```
+
+#### **Token Lifecycle**
+1. **Initial Connection**: Obtains or validates OAuth token
+2. **Request Handling**: All requests use authenticated URLSession
+3. **Token Refresh**: On 401/403 errors, automatically refreshes token and retries
+4. **Transport Recreation**: Creates new transport with fresh token (rare event)
+5. **Disconnect**: Properly cleans up resources
+
+#### **Design Trade-offs**
+- **Simplicity over micro-optimization**: Prioritizes maintainability and correctness
+- **Transport recreation on token refresh**: Acceptable overhead for infrequent token refreshes (typically hourly)
+- **No complex pooling**: Reduces potential bugs and edge cases
+- **Clear architecture**: Easy to understand and debug
+
+#### **Best Practices**
+```swift
+// ✅ Good: Reuse the same transport instance
+let transport = OAuthHTTPClientTransport(endpoint: serverURL, oauthConfig: config)
+try await transport.connect()
+
+for request in requests {
+    try await transport.send(request)  // Efficient session reuse
+}
+
+await transport.disconnect()  // Proper cleanup
+
+// ❌ Avoid: Creating new transport instances unnecessarily
+for request in requests {
+    let newTransport = OAuthHTTPClientTransport(endpoint: serverURL, oauthConfig: config)
+    try await newTransport.connect()
+    try await newTransport.send(request)  // Inefficient - no reuse
+    await newTransport.disconnect()
+}
+```
 
 ## Migration from HTTP Transport
 
