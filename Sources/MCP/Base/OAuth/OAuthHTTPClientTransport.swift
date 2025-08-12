@@ -82,7 +82,10 @@ public actor OAuthHTTPClientTransport: Transport {
     /// Creates or updates the base transport with current OAuth token
     private func updateBaseTransport(with token: OAuthToken) {
         // Create a new configuration with OAuth headers
-        let config = sessionConfiguration.copy() as! URLSessionConfiguration
+        guard let config = sessionConfiguration.copy() as? URLSessionConfiguration else {
+            logger.error("Failed to copy URLSession configuration")
+            return
+        }
         var headers = config.httpAdditionalHeaders as? [String: String] ?? [:]
         headers["Authorization"] = "\(token.tokenType) \(token.accessToken)"
         config.httpAdditionalHeaders = headers

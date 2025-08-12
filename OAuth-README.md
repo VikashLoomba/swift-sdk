@@ -505,19 +505,19 @@ let authenticatedSession = URLSession(configuration: config)
 
 ## Performance & Architecture
 
-### 🚀 Streamlined OAuth Transport
+### 🚀 Simplified OAuth Transport
 
-The OAuth transport provides secure authentication with a clean, efficient architecture:
+The OAuth transport provides secure authentication with a clean, maintainable architecture:
 
 #### **Key Features**
 - **Full SSE Support**: OAuth headers are added to ALL requests, including Server-Sent Events
 - **Automatic Token Management**: Handles token refresh transparently
-- **Simple Architecture**: No complex pooling or state management
-- **Memory Efficient**: Single transport instance with authenticated URLSession
+- **Simple Architecture**: Straightforward implementation without complex state management
+- **Correct Authentication**: All HTTP requests (POST, GET, SSE) include OAuth headers
 
-#### **Architecture Benefits**
+#### **How It Works**
 ```swift
-// ✅ Simple and Effective
+// OAuth transport wraps HTTPClientTransport with authentication
 let transport = OAuthHTTPClientTransport(
     endpoint: URL(string: "https://server.com")!,
     oauthConfig: oauthConfig
@@ -533,14 +533,14 @@ let stream = transport.receive()    // Authenticated SSE GET
 1. **Initial Connection**: Obtains or validates OAuth token
 2. **Request Handling**: All requests use authenticated URLSession
 3. **Token Refresh**: On 401/403 errors, automatically refreshes token and retries
-4. **Session Update**: Creates new authenticated session with fresh token
-5. **Disconnect**: Cleans up session resources
+4. **Transport Recreation**: Creates new transport with fresh token (rare event)
+5. **Disconnect**: Properly cleans up resources
 
-#### **Performance Impact**
-- **Reduced Complexity**: Simpler code is easier to maintain and debug
-- **Lower Memory Usage**: Single URLSession per token
-- **Reliable SSE**: Server-Sent Events work correctly with OAuth
-- **Efficient Token Refresh**: Only recreates session when token changes
+#### **Design Trade-offs**
+- **Simplicity over micro-optimization**: Prioritizes maintainability and correctness
+- **Transport recreation on token refresh**: Acceptable overhead for infrequent token refreshes (typically hourly)
+- **No complex pooling**: Reduces potential bugs and edge cases
+- **Clear architecture**: Easy to understand and debug
 
 #### **Best Practices**
 ```swift
