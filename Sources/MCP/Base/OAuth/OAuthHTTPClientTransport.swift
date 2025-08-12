@@ -191,11 +191,15 @@ public actor OAuthHTTPClientTransport: Transport {
                     return
                 }
                 
-                // Delegate to base transport - SSE will have OAuth headers via URLSession configuration
-                for try await data in await transport.receive() {
-                    continuation.yield(data)
+                do {
+                    // Delegate to base transport - SSE will have OAuth headers via URLSession configuration
+                    for try await data in await transport.receive() {
+                        continuation.yield(data)
+                    }
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
                 }
-                continuation.finish()
             }
         }
     }
