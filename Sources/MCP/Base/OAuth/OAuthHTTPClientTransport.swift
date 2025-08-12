@@ -154,6 +154,9 @@ public actor OAuthHTTPClientTransport: Transport {
             logger: logger
         )
         
+        // Connect the transport before using it
+        try await authenticatedTransport.connect()
+        
         // Send the request
         try await authenticatedTransport.send(data)
     }
