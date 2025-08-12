@@ -34,6 +34,9 @@ public actor OAuthHTTPClientTransport: Transport {
     /// Pool of reusable authenticated URLSession instances
     private var authenticatedSessionPool: [String: URLSession] = [:]
     
+    /// Pool of reusable authenticated transport instances
+    private var authenticatedTransportPool: [String: HTTPClientTransport] = [:]
+    
     /// Creates a new OAuth-enabled HTTP transport
     ///
     /// - Parameters:
@@ -160,24 +163,42 @@ public actor OAuthHTTPClientTransport: Transport {
         // Get valid token
         let token = try await authenticator.getValidToken(for: tokenIdentifier)
         
-        // Get or create an authenticated session for this token
+        // Get or create an authenticated transport for this token
+        let authenticatedTransport = try await getOrCreateAuthenticatedTransport(for: token)
+        
+        // Use the pooled transport to send the data
+        try await authenticatedTransport.send(data)
+    }
+    
+    /// Gets or creates an authenticated transport for the given token
+    /// Implements transport instance pooling to reuse transport instances with the same token
+    private func getOrCreateAuthenticatedTransport(for token: OAuthToken) async throws -> HTTPClientTransport {
+        let sessionKey = hashAccessToken(token.accessToken) // Use hash of access token for security
+        
+        if let existingTransport = authenticatedTransportPool[sessionKey] {
+            logger.trace("Reusing authenticated transport from pool")
+            return existingTransport
+        }
+        
+        // Create new authenticated session
         let authenticatedSession = getOrCreateAuthenticatedSession(for: token)
         
-        // Use the authenticated session directly instead of creating a new transport
-        var request = URLRequest(url: baseTransport.endpoint)
-        request.httpMethod = "POST"
-        request.httpBody = data
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // Create new transport with the authenticated session
+        let transport = HTTPClientTransport(
+            endpoint: baseTransport.endpoint,
+            session: authenticatedSession,
+            streaming: false,
+            logger: logger
+        )
         
-        let (_, response) = try await authenticatedSession.data(for: request)
+        // Connect the transport
+        try await transport.connect()
         
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw MCPError.internalError("Invalid response type")
-        }
+        // Add to pool for reuse
+        authenticatedTransportPool[sessionKey] = transport
+        logger.trace("Created new authenticated transport and added to pool")
         
-        guard 200...299 ~= httpResponse.statusCode else {
-            throw MCPError.internalError("HTTP request failed with status \(httpResponse.statusCode)")
-        }
+        return transport
     }
     
     /// Gets or creates an authenticated URLSession for the given token
@@ -235,18 +256,24 @@ public actor OAuthHTTPClientTransport: Transport {
     }
     #endif
     
-    /// Cleans up the authenticated session pool
-    /// Invalidates all sessions synchronously since invalidateAndCancel is not async
+    /// Cleans up the authenticated session and transport pools
+    /// Invalidates all sessions and disconnects all transports
     private func cleanupSessionPool() async {
-        logger.debug("Cleaning up \(authenticatedSessionPool.count) authenticated sessions")
+        logger.debug("Cleaning up \(authenticatedSessionPool.count) authenticated sessions and \(authenticatedTransportPool.count) authenticated transports")
+        
+        // Disconnect all authenticated transports
+        for (_, transport) in authenticatedTransportPool {
+            await transport.disconnect()
+        }
+        authenticatedTransportPool.removeAll()
         
         // Invalidate all sessions - invalidateAndCancel is synchronous
         for (_, session) in authenticatedSessionPool {
             session.invalidateAndCancel()
         }
-        
         authenticatedSessionPool.removeAll()
-        logger.debug("Cleaned up authenticated session pool")
+        
+        logger.debug("Cleaned up authenticated session and transport pools")
     }
     
     private func isAuthenticationError(_ error: Swift.Error) -> Bool {
