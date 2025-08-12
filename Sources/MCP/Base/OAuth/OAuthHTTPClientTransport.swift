@@ -191,12 +191,17 @@ public actor OAuthHTTPClientTransport: Transport {
             logger: logger
         )
         
-        // Connect the transport
-        try await transport.connect()
-        
-        // Add to pool for reuse
-        authenticatedTransportPool[sessionKey] = transport
-        logger.trace("Created new authenticated transport and added to pool")
+        // Connect the transport with error handling
+        do {
+            try await transport.connect()
+            // Only add to pool after successful connection
+            authenticatedTransportPool[sessionKey] = transport
+            logger.trace("Created new authenticated transport and added to pool")
+        } catch {
+            // Don't add failed transport to pool
+            logger.error("Failed to connect authenticated transport", metadata: ["error": "\(error)"])
+            throw error
+        }
         
         return transport
     }
