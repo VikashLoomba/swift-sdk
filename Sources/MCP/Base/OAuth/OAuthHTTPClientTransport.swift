@@ -5,6 +5,14 @@ import Logging
 import FoundationNetworking
 #endif
 
+#if canImport(CryptoKit)
+import CryptoKit
+#endif
+
+#if !canImport(CryptoKit) && canImport(CommonCrypto)
+import CommonCrypto
+#endif
+
 /// An HTTP transport that automatically handles OAuth authentication
 ///
 /// This transport extends the functionality of HTTPClientTransport by automatically
@@ -155,24 +163,27 @@ public actor OAuthHTTPClientTransport: Transport {
         // Get or create an authenticated session for this token
         let authenticatedSession = getOrCreateAuthenticatedSession(for: token)
         
-        // Create an authenticated transport using the pooled session
-        // Only create transport if we don't already have one for this token
-        let authenticatedTransport = HTTPClientTransport(
-            endpoint: baseTransport.endpoint,
-            session: authenticatedSession,
-            streaming: false, // Disable streaming for authenticated requests to avoid conflicts
-            logger: logger
-        )
+        // Use the authenticated session directly instead of creating a new transport
+        var request = URLRequest(url: baseTransport.endpoint)
+        request.httpMethod = "POST"
+        request.httpBody = data
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
-        // Connect and send using the authenticated transport
-        try await authenticatedTransport.connect()
-        try await authenticatedTransport.send(data)
+        let (_, response) = try await authenticatedSession.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw MCPError.internalError("Invalid response type")
+        }
+        
+        guard 200...299 ~= httpResponse.statusCode else {
+            throw MCPError.internalError("HTTP request failed with status \(httpResponse.statusCode)")
+        }
     }
     
     /// Gets or creates an authenticated URLSession for the given token
     /// Implements session pooling to reuse sessions with the same token
     private func getOrCreateAuthenticatedSession(for token: OAuthToken) -> URLSession {
-        let sessionKey = token.accessToken // Use access token as key for session pooling
+        let sessionKey = hashAccessToken(token.accessToken) // Use hash of access token for security
         
         if let existingSession = authenticatedSessionPool[sessionKey] {
             logger.trace("Reusing authenticated session from pool")
@@ -194,20 +205,44 @@ public actor OAuthHTTPClientTransport: Transport {
         return authenticatedSession
     }
     
+    /// Creates a secure hash of the access token for use as a session key
+    /// This prevents token exposure in memory dumps and logs
+    private func hashAccessToken(_ accessToken: String) -> String {
+        let data = Data(accessToken.utf8)
+        
+        #if canImport(CryptoKit)
+        let digest = SHA256.hash(data: data)
+        return digest.compactMap { String(format: "%02x", $0) }.joined()
+        #elseif canImport(CommonCrypto)
+        // Fallback implementation for platforms with CommonCrypto
+        let digest = sha256Fallback(data)
+        return digest.map { String(format: "%02x", $0) }.joined()
+        #else
+        // Last resort: use simple hash (not cryptographically secure)
+        logger.warning("No cryptographic hashing available, using simple hash for session keys")
+        return String(accessToken.hashValue)
+        #endif
+    }
+    
+    #if !canImport(CryptoKit) && canImport(CommonCrypto)
+    /// Fallback SHA256 implementation for platforms with CommonCrypto
+    private func sha256Fallback(_ data: Data) -> Data {
+        var hash = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+        data.withUnsafeBytes {
+            _ = CC_SHA256($0.baseAddress, CC_LONG(data.count), &hash)
+        }
+        return Data(hash)
+    }
+    #endif
+    
     /// Cleans up the authenticated session pool
-    /// Uses async to avoid blocking on network operations during session invalidation
+    /// Invalidates all sessions synchronously since invalidateAndCancel is not async
     private func cleanupSessionPool() async {
         logger.debug("Cleaning up \(authenticatedSessionPool.count) authenticated sessions")
         
-        // Invalidate all sessions asynchronously
-        await withTaskGroup(of: Void.self) { group in
-            for (_, session) in authenticatedSessionPool {
-                group.addTask {
-                    // invalidateAndCancel is not async but may perform cleanup operations
-                    // Running it in a task group allows concurrent cleanup
-                    session.invalidateAndCancel()
-                }
-            }
+        // Invalidate all sessions - invalidateAndCancel is synchronous
+        for (_, session) in authenticatedSessionPool {
+            session.invalidateAndCancel()
         }
         
         authenticatedSessionPool.removeAll()
