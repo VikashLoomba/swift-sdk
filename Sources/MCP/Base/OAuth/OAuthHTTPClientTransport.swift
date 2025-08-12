@@ -5,22 +5,13 @@ import Logging
 import FoundationNetworking
 #endif
 
-#if canImport(CryptoKit)
-import CryptoKit
-#endif
-
-#if !canImport(CryptoKit) && canImport(CommonCrypto)
-import CommonCrypto
-#endif
-
 /// An HTTP transport that automatically handles OAuth authentication
 ///
 /// This transport extends the functionality of HTTPClientTransport by automatically
-/// injecting OAuth tokens into requests and handling token refresh when needed.
-/// Uses session reuse and request interception for efficient authentication.
+/// injecting OAuth tokens into ALL requests (including SSE) and handling token refresh when needed.
 public actor OAuthHTTPClientTransport: Transport {
-    /// The underlying HTTP transport
-    private let baseTransport: HTTPClientTransport
+    /// The endpoint URL for the MCP server
+    internal let endpoint: URL
     
     /// OAuth authenticator for managing tokens
     private let authenticator: OAuthAuthenticator
@@ -31,11 +22,14 @@ public actor OAuthHTTPClientTransport: Transport {
     /// Logger instance for transport-related events
     public nonisolated let logger: Logger
     
-    /// Pool of reusable authenticated URLSession instances
-    private var authenticatedSessionPool: [String: URLSession] = [:]
+    /// The underlying HTTP transport - recreated when token changes
+    private var baseTransport: HTTPClientTransport?
     
-    /// Pool of reusable authenticated transport instances
-    private var authenticatedTransportPool: [String: HTTPClientTransport] = [:]
+    /// URLSession configuration template
+    private let sessionConfiguration: URLSessionConfiguration
+    
+    /// Whether streaming is enabled
+    private let streaming: Bool
     
     /// Creates a new OAuth-enabled HTTP transport
     ///
@@ -56,6 +50,10 @@ public actor OAuthHTTPClientTransport: Transport {
         streaming: Bool = true,
         logger: Logger? = nil
     ) {
+        self.endpoint = endpoint
+        self.sessionConfiguration = configuration
+        self.streaming = streaming
+        
         let effectiveLogger = logger ?? Logger(label: "mcp.transport.oauth.http.client")
         self.logger = effectiveLogger
         self.tokenIdentifier = tokenIdentifier
@@ -70,7 +68,7 @@ public actor OAuthHTTPClientTransport: Transport {
         storage = tokenStorage ?? InMemoryTokenStorage()
 #endif
         
-        // Create URLSession for the base transport (unauthenticated)
+        // Create URLSession for the authenticator
         let session = URLSession(configuration: configuration)
         
         self.authenticator = OAuthAuthenticator(
@@ -79,14 +77,28 @@ public actor OAuthHTTPClientTransport: Transport {
             urlSession: session,
             logger: effectiveLogger
         )
+    }
+    
+    /// Creates or updates the base transport with current OAuth token
+    private func updateBaseTransport(with token: OAuthToken) {
+        // Create a new configuration with OAuth headers
+        let config = sessionConfiguration.copy() as! URLSessionConfiguration
+        var headers = config.httpAdditionalHeaders as? [String: String] ?? [:]
+        headers["Authorization"] = "\(token.tokenType) \(token.accessToken)"
+        config.httpAdditionalHeaders = headers
         
-        // Create base transport without authentication (we'll handle auth in send method)
+        // Create a new session with the updated configuration
+        let authenticatedSession = URLSession(configuration: config)
+        
+        // Create new transport with authenticated session
         self.baseTransport = HTTPClientTransport(
             endpoint: endpoint,
-            session: session,
+            session: authenticatedSession,
             streaming: streaming,
-            logger: effectiveLogger
+            logger: logger
         )
+        
+        logger.debug("Updated base transport with new OAuth token")
     }
     
     /// Establishes connection with OAuth authentication
@@ -94,16 +106,23 @@ public actor OAuthHTTPClientTransport: Transport {
         logger.info("Connecting OAuth HTTP transport")
         
         // Perform initial authentication if needed
+        let token: OAuthToken
         do {
-            _ = try await authenticator.getValidToken(for: tokenIdentifier)
+            token = try await authenticator.getValidToken(for: tokenIdentifier)
             logger.debug("OAuth token available")
         } catch OAuthError.authenticationRequired {
             logger.info("No valid token found, performing client credentials authentication")
-            _ = try await authenticator.authenticateWithClientCredentials(identifier: tokenIdentifier)
+            token = try await authenticator.authenticateWithClientCredentials(identifier: tokenIdentifier)
         }
         
+        // Create base transport with authenticated session
+        updateBaseTransport(with: token)
+        
         // Connect the base transport
-        try await baseTransport.connect()
+        guard let transport = baseTransport else {
+            throw MCPError.internalError("Failed to create base transport")
+        }
+        try await transport.connect()
         
         logger.info("OAuth HTTP transport connected")
     }
@@ -112,29 +131,47 @@ public actor OAuthHTTPClientTransport: Transport {
     public func disconnect() async {
         logger.info("Disconnecting OAuth HTTP transport")
         
-        // Clean up authenticated session pool
-        await cleanupSessionPool()
-        
         // Disconnect the base transport
-        await baseTransport.disconnect()
+        if let transport = baseTransport {
+            await transport.disconnect()
+        }
+        
+        self.baseTransport = nil
     }
     
-    /// Sends data with automatic OAuth token injection
+    /// Sends data with automatic OAuth token injection and refresh
     public func send(_ data: Data) async throws {
+        guard let transport = baseTransport else {
+            throw MCPError.internalError("Transport not connected")
+        }
+        
+        // Try to send with current token
         do {
-            try await sendWithAuthentication(data)
+            try await transport.send(data)
         } catch {
             // Check if this is an authentication error
             if isAuthenticationError(error) {
                 logger.info("Authentication error detected, refreshing token and retrying")
                 
-                // Get current token and try to refresh it
+                // Try to refresh the token
                 do {
                     let currentToken = try await authenticator.getValidToken(for: tokenIdentifier)
-                    _ = try await authenticator.refreshToken(currentToken, identifier: tokenIdentifier)
+                    let newToken = try await authenticator.refreshToken(currentToken, identifier: tokenIdentifier)
+                    
+                    // Disconnect old transport
+                    await transport.disconnect()
+                    
+                    // Update transport with new token
+                    updateBaseTransport(with: newToken)
+                    
+                    // Reconnect with new token
+                    guard let newTransport = baseTransport else {
+                        throw MCPError.internalError("Failed to create transport with new token")
+                    }
+                    try await newTransport.connect()
                     
                     // Retry the request with the new token
-                    try await sendWithAuthentication(data)
+                    try await newTransport.send(data)
                 } catch {
                     logger.error("Failed to refresh token and retry request", metadata: ["error": "\(error)"])
                     throw error
@@ -149,7 +186,13 @@ public actor OAuthHTTPClientTransport: Transport {
     public func receive() -> AsyncThrowingStream<Data, Swift.Error> {
         return AsyncThrowingStream { continuation in
             Task {
-                for try await data in await baseTransport.receive() {
+                guard let transport = self.baseTransport else {
+                    continuation.finish(throwing: MCPError.internalError("Transport not connected"))
+                    return
+                }
+                
+                // Delegate to base transport - SSE will have OAuth headers via URLSession configuration
+                for try await data in await transport.receive() {
                     continuation.yield(data)
                 }
                 continuation.finish()
@@ -159,135 +202,14 @@ public actor OAuthHTTPClientTransport: Transport {
     
     // MARK: - Private Methods
     
-    private func sendWithAuthentication(_ data: Data) async throws {
-        // Get valid token
-        let token = try await authenticator.getValidToken(for: tokenIdentifier)
-        
-        // Get or create an authenticated transport for this token
-        let authenticatedTransport = try await getOrCreateAuthenticatedTransport(for: token)
-        
-        // Use the pooled transport to send the data
-        try await authenticatedTransport.send(data)
-    }
-    
-    /// Gets or creates an authenticated transport for the given token
-    /// Implements transport instance pooling to reuse transport instances with the same token
-    private func getOrCreateAuthenticatedTransport(for token: OAuthToken) async throws -> HTTPClientTransport {
-        let sessionKey = hashAccessToken(token.accessToken) // Use hash of access token for security
-        
-        if let existingTransport = authenticatedTransportPool[sessionKey] {
-            logger.trace("Reusing authenticated transport from pool")
-            return existingTransport
-        }
-        
-        // Create new authenticated session
-        let authenticatedSession = getOrCreateAuthenticatedSession(for: token)
-        
-        // Create new transport with the authenticated session
-        let transport = HTTPClientTransport(
-            endpoint: baseTransport.endpoint,
-            session: authenticatedSession,
-            streaming: false,
-            logger: logger
-        )
-        
-        // Connect the transport with error handling
-        do {
-            try await transport.connect()
-            // Only add to pool after successful connection
-            authenticatedTransportPool[sessionKey] = transport
-            logger.trace("Created new authenticated transport and added to pool")
-        } catch {
-            // Don't add failed transport to pool
-            logger.error("Failed to connect authenticated transport", metadata: ["error": "\(error)"])
-            throw error
-        }
-        
-        return transport
-    }
-    
-    /// Gets or creates an authenticated URLSession for the given token
-    /// Implements session pooling to reuse sessions with the same token
-    private func getOrCreateAuthenticatedSession(for token: OAuthToken) -> URLSession {
-        let sessionKey = hashAccessToken(token.accessToken) // Use hash of access token for security
-        
-        if let existingSession = authenticatedSessionPool[sessionKey] {
-            logger.trace("Reusing authenticated session from pool")
-            return existingSession
-        }
-        
-        // Create new authenticated session
-        let config = URLSessionConfiguration.default
-        var headers = config.httpAdditionalHeaders as? [String: String] ?? [:]
-        headers["Authorization"] = "\(token.tokenType) \(token.accessToken)"
-        config.httpAdditionalHeaders = headers
-        
-        let authenticatedSession = URLSession(configuration: config)
-        
-        // Add to pool for reuse
-        authenticatedSessionPool[sessionKey] = authenticatedSession
-        logger.trace("Created new authenticated session and added to pool")
-        
-        return authenticatedSession
-    }
-    
-    /// Creates a secure hash of the access token for use as a session key
-    /// This prevents token exposure in memory dumps and logs
-    private func hashAccessToken(_ accessToken: String) -> String {
-        let data = Data(accessToken.utf8)
-        
-        #if canImport(CryptoKit)
-        let digest = SHA256.hash(data: data)
-        return digest.compactMap { String(format: "%02x", $0) }.joined()
-        #elseif canImport(CommonCrypto)
-        // Fallback implementation for platforms with CommonCrypto
-        let digest = sha256Fallback(data)
-        return digest.map { String(format: "%02x", $0) }.joined()
-        #else
-        // Last resort: use simple hash (not cryptographically secure)
-        logger.warning("No cryptographic hashing available, using simple hash for session keys")
-        return String(accessToken.hashValue)
-        #endif
-    }
-    
-    #if !canImport(CryptoKit) && canImport(CommonCrypto)
-    /// Fallback SHA256 implementation for platforms with CommonCrypto
-    private func sha256Fallback(_ data: Data) -> Data {
-        var hash = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
-        data.withUnsafeBytes {
-            _ = CC_SHA256($0.baseAddress, CC_LONG(data.count), &hash)
-        }
-        return Data(hash)
-    }
-    #endif
-    
-    /// Cleans up the authenticated session and transport pools
-    /// Invalidates all sessions and disconnects all transports
-    private func cleanupSessionPool() async {
-        logger.debug("Cleaning up \(authenticatedSessionPool.count) authenticated sessions and \(authenticatedTransportPool.count) authenticated transports")
-        
-        // Disconnect all authenticated transports
-        for (_, transport) in authenticatedTransportPool {
-            await transport.disconnect()
-        }
-        authenticatedTransportPool.removeAll()
-        
-        // Invalidate all sessions - invalidateAndCancel is synchronous
-        for (_, session) in authenticatedSessionPool {
-            session.invalidateAndCancel()
-        }
-        authenticatedSessionPool.removeAll()
-        
-        logger.debug("Cleaned up authenticated session and transport pools")
-    }
-    
     private func isAuthenticationError(_ error: Swift.Error) -> Bool {
         // Check if this is an MCP authentication error
         if let mcpError = error as? MCPError,
            case .internalError(let message) = mcpError {
             return (message?.contains("Authentication required") ?? false) || 
                    (message?.contains("Access forbidden") ?? false) ||
-                   (message?.contains("401") ?? false)
+                   (message?.contains("401") ?? false) ||
+                   (message?.contains("403") ?? false)
         }
         
         return false

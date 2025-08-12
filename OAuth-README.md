@@ -451,47 +451,41 @@ The SDK enforces OAuth 2.1 compliance rules:
 
 ### 🔧 Architectural Improvements
 
-Recent improvements to the OAuth transport eliminate common connection issues and improve performance:
+Recent improvements to the OAuth transport fix critical SSE authentication issues and simplify the architecture:
 
-#### **Fixed "Transport Not Connected" Error**
-The transport now properly handles authenticated requests without creating unnecessary transport instances:
+#### **Full SSE Support for OAuth-Protected Servers**
+The transport now properly authenticates ALL requests, including Server-Sent Events (SSE):
 
 ```swift
-// Previous implementation had connection issues
-// Now fixed with session pooling approach
+// OAuth headers are automatically added to both POST and SSE GET requests
 let transport = OAuthHTTPClientTransport(
     endpoint: URL(string: "https://server.com")!,
     oauthConfig: oauthConfig
 )
 
 try await transport.connect()
-try await transport.send(data)  // Now works reliably
+// Both regular requests and SSE streaming are authenticated
+try await transport.send(data)  // POST requests work
+let stream = transport.receive()  // SSE GET requests also authenticated
 ```
 
-#### **Session Pool Implementation**
+#### **Simplified Architecture**
+The OAuth transport uses a clean, maintainable approach:
+- **Single Transport**: One HTTPClientTransport with OAuth headers in URLSession configuration
+- **Automatic Authentication**: OAuth headers added to ALL requests via httpAdditionalHeaders
+- **Token Refresh**: Recreates transport with new authenticated session when token changes
+- **No Complex Pooling**: Removed unnecessary session/transport pooling complexity
+
+#### **How It Works**
 ```swift
-// Internal session pooling (automatically handled)
-private var authenticatedSessionPool: [String: URLSession] = [:]
+// OAuth headers are baked into the URLSession configuration
+let config = URLSessionConfiguration.default
+config.httpAdditionalHeaders = ["Authorization": "Bearer \(token)"]
+let authenticatedSession = URLSession(configuration: config)
 
-private func getOrCreateAuthenticatedSession(for token: OAuthToken) -> URLSession {
-    let sessionKey = token.accessToken
-    
-    if let existingSession = authenticatedSessionPool[sessionKey] {
-        return existingSession  // Reuse existing session
-    }
-    
-    // Create new session only when needed
-    let authenticatedSession = URLSession(configuration: configWithAuth)
-    authenticatedSessionPool[sessionKey] = authenticatedSession
-    return authenticatedSession
-}
+// All requests through this session are authenticated
+// Including both POST (send) and GET (SSE receive) requests
 ```
-
-#### **Automatic Cleanup**
-Sessions are automatically cleaned up to prevent resource leaks:
-- **On Disconnect**: All pooled sessions are invalidated
-- **On Token Refresh**: Old sessions are replaced with new ones
-- **On Error**: Failed sessions are removed from pool
 
 ## Security Considerations
 
@@ -511,42 +505,42 @@ Sessions are automatically cleaned up to prevent resource leaks:
 
 ## Performance & Architecture
 
-### 🚀 Session Pooling & Reuse
+### 🚀 Streamlined OAuth Transport
 
-The OAuth transport implements efficient session pooling to optimize performance and resource usage:
+The OAuth transport provides secure authentication with a clean, efficient architecture:
 
-#### **Efficient Session Management**
-- **Session Reuse**: Authenticated `URLSession` instances are pooled and reused based on access tokens
-- **No Transport Creation**: Eliminates the inefficient pattern of creating new `HTTPClientTransport` instances for each request
-- **Memory Efficient**: Automatic cleanup prevents session leaks and resource waste
-- **Connection Pooling**: HTTP connections are reused across requests with the same authentication
+#### **Key Features**
+- **Full SSE Support**: OAuth headers are added to ALL requests, including Server-Sent Events
+- **Automatic Token Management**: Handles token refresh transparently
+- **Simple Architecture**: No complex pooling or state management
+- **Memory Efficient**: Single transport instance with authenticated URLSession
 
 #### **Architecture Benefits**
 ```swift
-// ✅ Efficient Pattern (Current Implementation)
-// Sessions are automatically pooled and reused
+// ✅ Simple and Effective
 let transport = OAuthHTTPClientTransport(
     endpoint: URL(string: "https://server.com")!,
     oauthConfig: oauthConfig
 )
 
-// Multiple requests reuse the same authenticated session
-try await transport.send(request1)  // Creates session pool entry
-try await transport.send(request2)  // Reuses existing session
-try await transport.send(request3)  // Reuses existing session
+// All requests are automatically authenticated
+try await transport.send(request1)  // Authenticated POST
+try await transport.send(request2)  // Authenticated POST
+let stream = transport.receive()    // Authenticated SSE GET
 ```
 
-#### **Session Lifecycle**
-1. **First Request**: Creates new authenticated session and adds to pool
-2. **Subsequent Requests**: Reuses session from pool for same access token
-3. **Token Refresh**: New session created for new token, old session cleaned up
-4. **Disconnect**: All pooled sessions are properly invalidated and cleaned up
+#### **Token Lifecycle**
+1. **Initial Connection**: Obtains or validates OAuth token
+2. **Request Handling**: All requests use authenticated URLSession
+3. **Token Refresh**: On 401/403 errors, automatically refreshes token and retries
+4. **Session Update**: Creates new authenticated session with fresh token
+5. **Disconnect**: Cleans up session resources
 
 #### **Performance Impact**
-- **Reduced Latency**: Session reuse eliminates connection setup overhead
-- **Lower Memory Usage**: Single session per token instead of per request
-- **Better Throughput**: HTTP connection reuse improves request performance
-- **Resource Efficiency**: Proper cleanup prevents accumulation of unused sessions
+- **Reduced Complexity**: Simpler code is easier to maintain and debug
+- **Lower Memory Usage**: Single URLSession per token
+- **Reliable SSE**: Server-Sent Events work correctly with OAuth
+- **Efficient Token Refresh**: Only recreates session when token changes
 
 #### **Best Practices**
 ```swift

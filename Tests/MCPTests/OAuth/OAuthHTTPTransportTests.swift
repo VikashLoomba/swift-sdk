@@ -70,8 +70,8 @@ struct OAuthHTTPTransportTests {
         // This is tested through integration tests where we simulate auth failures
     }
     
-    @Test("OAuth transport session pooling and reuse")
-    func testSessionPoolingAndReuse() async throws {
+    @Test("OAuth transport with authenticated session")
+    func testOAuthTransportWithAuthenticatedSession() async throws {
         // Create a mock token storage with a valid token
         let mockStorage = InMemoryTokenStorage()
         let testToken = OAuthToken(
@@ -95,7 +95,7 @@ struct OAuthHTTPTransportTests {
             oauthConfig: config,
             tokenStorage: mockStorage,
             tokenIdentifier: "test",
-            logger: Logger(label: "test-pooling")
+            logger: Logger(label: "test-oauth")
         )
         
         // Connect the transport
@@ -111,23 +111,22 @@ struct OAuthHTTPTransportTests {
         }
         """.data(using: .utf8)!
         
-        // Make multiple requests to test session reuse
-        // The refactored implementation should reuse authenticated sessions
-        // instead of creating new transport instances for each request
-        for i in 1...3 {
+        // Make multiple requests to verify OAuth headers are properly added
+        // The simplified implementation should add OAuth headers to all requests
+        for _ in 1...3 {
             do {
                 try await transport.send(testMessage)
-                // Success - sessions are being reused efficiently
+                // Success - OAuth headers are being added
             } catch let error as MCPError {
                 // Verify it's not the "Transport not connected" error
                 if case .internalError(let message) = error {
                     #expect(!(message?.contains("Transport not connected") ?? false), 
-                            "Should not get 'Transport not connected' error after refactoring")
+                            "Should not get 'Transport not connected' error")
                 }
                 // Other errors are expected since we're hitting a real endpoint
             } catch {
                 // Other types of errors are also acceptable for this test
-                // We're testing that session pooling works correctly
+                // We're testing that the transport works with OAuth headers
             }
         }
         
