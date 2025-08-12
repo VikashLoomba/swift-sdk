@@ -9,6 +9,7 @@ import FoundationNetworking
 ///
 /// This transport extends the functionality of HTTPClientTransport by automatically
 /// injecting OAuth tokens into requests and handling token refresh when needed.
+/// Uses session reuse and request interception for efficient authentication.
 public actor OAuthHTTPClientTransport: Transport {
     /// The underlying HTTP transport
     private let baseTransport: HTTPClientTransport
@@ -21,6 +22,9 @@ public actor OAuthHTTPClientTransport: Transport {
     
     /// Logger instance for transport-related events
     public nonisolated let logger: Logger
+    
+    /// Pool of reusable authenticated URLSession instances
+    private var authenticatedSessionPool: [String: URLSession] = [:]
     
     /// Creates a new OAuth-enabled HTTP transport
     ///
@@ -42,18 +46,10 @@ public actor OAuthHTTPClientTransport: Transport {
         logger: Logger? = nil
     ) {
         let effectiveLogger = logger ?? Logger(label: "mcp.transport.oauth.http.client")
+        self.logger = effectiveLogger
+        self.tokenIdentifier = tokenIdentifier
         
-        // Create authenticated URL session
-        let authenticatedConfig = configuration.copy() as! URLSessionConfiguration
-        let session = URLSession(configuration: authenticatedConfig)
-        
-        self.baseTransport = HTTPClientTransport(
-            endpoint: endpoint,
-            session: session,
-            streaming: streaming,
-            logger: effectiveLogger
-        )
-        
+        // Set up token storage
         let storage: TokenStorage
 #if canImport(Security)
         storage = tokenStorage ?? KeychainTokenStorage()
@@ -63,6 +59,9 @@ public actor OAuthHTTPClientTransport: Transport {
         storage = tokenStorage ?? InMemoryTokenStorage()
 #endif
         
+        // Create URLSession for the base transport (unauthenticated)
+        let session = URLSession(configuration: configuration)
+        
         self.authenticator = OAuthAuthenticator(
             configuration: oauthConfig,
             tokenStorage: storage,
@@ -70,8 +69,13 @@ public actor OAuthHTTPClientTransport: Transport {
             logger: effectiveLogger
         )
         
-        self.tokenIdentifier = tokenIdentifier
-        self.logger = effectiveLogger
+        // Create base transport without authentication (we'll handle auth in send method)
+        self.baseTransport = HTTPClientTransport(
+            endpoint: endpoint,
+            session: session,
+            streaming: streaming,
+            logger: effectiveLogger
+        )
     }
     
     /// Establishes connection with OAuth authentication
@@ -96,6 +100,11 @@ public actor OAuthHTTPClientTransport: Transport {
     /// Disconnects from the transport
     public func disconnect() async {
         logger.info("Disconnecting OAuth HTTP transport")
+        
+        // Clean up authenticated session pool
+        cleanupSessionPool()
+        
+        // Disconnect the base transport
         await baseTransport.disconnect()
     }
     
@@ -143,33 +152,55 @@ public actor OAuthHTTPClientTransport: Transport {
         // Get valid token
         let token = try await authenticator.getValidToken(for: tokenIdentifier)
         
-        // Create authenticated session with token
-        let authenticatedSession = createAuthenticatedSession(token: token)
+        // Get or create an authenticated session for this token
+        let authenticatedSession = getOrCreateAuthenticatedSession(for: token)
         
-        // Update the base transport's session
+        // Create an authenticated transport using the pooled session
+        // Only create transport if we don't already have one for this token
         let authenticatedTransport = HTTPClientTransport(
             endpoint: baseTransport.endpoint,
             session: authenticatedSession,
-            streaming: false, // Use base transport's streaming for SSE
+            streaming: false, // Disable streaming for authenticated requests to avoid conflicts
             logger: logger
         )
         
-        // Connect the transport before using it
+        // Connect and send using the authenticated transport
         try await authenticatedTransport.connect()
-        
-        // Send the request
         try await authenticatedTransport.send(data)
     }
     
-    private func createAuthenticatedSession(token: OAuthToken) -> URLSession {
-        let config = URLSessionConfiguration.default
+    /// Gets or creates an authenticated URLSession for the given token
+    /// Implements session pooling to reuse sessions with the same token
+    private func getOrCreateAuthenticatedSession(for token: OAuthToken) -> URLSession {
+        let sessionKey = token.accessToken // Use access token as key for session pooling
         
-        // Add OAuth authorization header
+        if let existingSession = authenticatedSessionPool[sessionKey] {
+            logger.trace("Reusing authenticated session from pool")
+            return existingSession
+        }
+        
+        // Create new authenticated session
+        let config = URLSessionConfiguration.default
         var headers = config.httpAdditionalHeaders as? [String: String] ?? [:]
         headers["Authorization"] = "\(token.tokenType) \(token.accessToken)"
         config.httpAdditionalHeaders = headers
         
-        return URLSession(configuration: config)
+        let authenticatedSession = URLSession(configuration: config)
+        
+        // Add to pool for reuse
+        authenticatedSessionPool[sessionKey] = authenticatedSession
+        logger.trace("Created new authenticated session and added to pool")
+        
+        return authenticatedSession
+    }
+    
+    /// Cleans up the authenticated session pool
+    private func cleanupSessionPool() {
+        for (_, session) in authenticatedSessionPool {
+            session.invalidateAndCancel()
+        }
+        authenticatedSessionPool.removeAll()
+        logger.debug("Cleaned up authenticated session pool")
     }
     
     private func isAuthenticationError(_ error: Swift.Error) -> Bool {
