@@ -168,6 +168,33 @@ struct ProgressNotificationTests {
         #expect(tool2.arguments == nil)
     }
     
+    @Test("CallToolWithMeta includes _meta field")
+    func testCallToolWithMetaEncoding() throws {
+        // Create a CallToolWithMeta request
+        let params = Client.CallToolWithMeta.Parameters(
+            name: "test-tool",
+            arguments: ["arg1": Value("value1")],
+            progressToken: "progress-123"
+        )
+        
+        // Encode to JSON
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let data = try encoder.encode(params)
+        let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        
+        // Verify structure
+        #expect(json?["name"] as? String == "test-tool")
+        if let args = json?["arguments"] as? [String: Any] {
+            #expect(args["arg1"] != nil)
+        }
+        if let meta = json?["_meta"] as? [String: Any] {
+            #expect(meta["progressToken"] as? String == "progress-123")
+        } else {
+            Issue.record("_meta field not found in encoded JSON")
+        }
+    }
+    
     @Test("Progress notification JSON structure")
     func testProgressNotificationJSONStructure() throws {
         let notification = Message<ProgressNotification>(

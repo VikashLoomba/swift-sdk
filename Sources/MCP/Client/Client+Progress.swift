@@ -3,31 +3,49 @@ import Logging
 
 // MARK: - Progress Support
 
-// Create a global actor-protected storage for progress observers
-private actor ProgressObserverStorage {
-    static let shared = ProgressObserverStorage()
+// Create a global actor-protected storage for progress observers and trackers
+private actor ProgressStorage {
+    static let shared = ProgressStorage()
     private var observers: [String: ProgressObserver] = [:]
+    private var trackers: [ObjectIdentifier: ProgressTracker] = [:]
     
-    func add(_ observer: ProgressObserver, for token: String) {
+    func addObserver(_ observer: ProgressObserver, for token: String) {
         observers[token] = observer
     }
     
-    func remove(for token: String) {
+    func removeObserver(for token: String) {
         observers.removeValue(forKey: token)
     }
     
-    func get(for token: String) -> ProgressObserver? {
+    func getObserver(for token: String) -> ProgressObserver? {
         observers[token]
     }
     
-    func removeAll() {
+    func removeAllObservers() {
         observers.removeAll()
+    }
+    
+    func getTracker(for client: Client) -> ProgressTracker {
+        let id = ObjectIdentifier(client)
+        if let tracker = trackers[id] {
+            return tracker
+        }
+        let tracker = ProgressTracker()
+        trackers[id] = tracker
+        return tracker
+    }
+    
+    func removeTracker(for client: Client) {
+        let id = ObjectIdentifier(client)
+        trackers.removeValue(forKey: id)
     }
 }
 
 extension Client {
-    /// Progress tracker for managing active progress tokens
-    private static let progressTracker = ProgressTracker()
+    /// Get the progress tracker for this client instance
+    private func getProgressTracker() async -> ProgressTracker {
+        await ProgressStorage.shared.getTracker(for: self)
+    }
     
     /// Call a tool with progress tracking
     public func callTool(
@@ -36,49 +54,43 @@ extension Client {
         progressToken: String? = nil,
         onProgress: ProgressHandler? = nil
     ) async throws -> CallTool.Result {
+        let tracker = await getProgressTracker()
+        
         // If progress tracking is requested, register the observer
         if let token = progressToken, let handler = onProgress {
             let observer = ProgressObserver(token: token, handler: handler)
-            await Self.progressTracker.registerToken(token)
-            await ProgressObserverStorage.shared.add(observer, for: token)
+            await tracker.registerToken(token)
+            await ProgressStorage.shared.addObserver(observer, for: token)
         }
         
         // Create the request with progress token if provided
-        let params: CallTool.Parameters
+        let result: CallTool.Result
+        
         if let progressToken = progressToken {
-            // We need to include _meta in the params
-            // This requires a custom encoding approach
-            params = CallTool.Parameters(
+            // Create a request with _meta field for progress tracking
+            let params = CallToolWithMeta.Parameters(
                 name: name,
-                arguments: arguments
+                arguments: arguments,
+                progressToken: progressToken
             )
-            // Note: Actual _meta injection would need to be done at the transport level
-            // or by modifying the CallTool.Parameters structure
+            
+            result = try await send(CallToolWithMeta.request(params))
         } else {
-            params = CallTool.Parameters(
+            // Standard request without progress
+            let params = CallTool.Parameters(
                 name: name,
                 arguments: arguments
             )
+            result = try await send(CallTool.request(params))
         }
         
-        do {
-            let result = try await send(CallTool.request(params))
-            
-            // Clean up progress tracking if it was used
-            if let token = progressToken {
-                await Self.progressTracker.completeToken(token)
-                await ProgressObserverStorage.shared.remove(for: token)
-            }
-            
-            return result
-        } catch {
-            // Clean up on error too
-            if let token = progressToken {
-                await Self.progressTracker.completeToken(token)
-                await ProgressObserverStorage.shared.remove(for: token)
-            }
-            throw error
+        // Clean up progress tracking if it was used
+        if let token = progressToken {
+            await tracker.completeToken(token)
+            await ProgressStorage.shared.removeObserver(for: token)
         }
+        
+        return result
     }
     
     /// Register a handler for progress notifications
@@ -91,9 +103,10 @@ extension Client {
             let params = message.params
             
             // Check if this token is being tracked
-            if await Self.progressTracker.isTokenActive(params.progressToken) {
+            let tracker = await self.getProgressTracker()
+            if await tracker.isTokenActive(params.progressToken) {
                 // Call the registered observer if it exists
-                if let observer = await ProgressObserverStorage.shared.get(for: params.progressToken) {
+                if let observer = await ProgressStorage.shared.getObserver(for: params.progressToken) {
                     await observer.update(progress: params.progress, total: params.total)
                 }
                 
@@ -112,8 +125,10 @@ extension Client {
     
     /// Clean up all progress tracking (useful on disconnect)
     internal func cleanupProgressTracking() async {
-        await Self.progressTracker.clearAllTokens()
-        await ProgressObserverStorage.shared.removeAll()
+        let tracker = await getProgressTracker()
+        await tracker.clearAllTokens()
+        await ProgressStorage.shared.removeAllObservers()
+        await ProgressStorage.shared.removeTracker(for: self)
     }
 }
 
