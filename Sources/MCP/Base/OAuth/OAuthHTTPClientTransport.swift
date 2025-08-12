@@ -102,7 +102,7 @@ public actor OAuthHTTPClientTransport: Transport {
         logger.info("Disconnecting OAuth HTTP transport")
         
         // Clean up authenticated session pool
-        cleanupSessionPool()
+        await cleanupSessionPool()
         
         // Disconnect the base transport
         await baseTransport.disconnect()
@@ -195,10 +195,21 @@ public actor OAuthHTTPClientTransport: Transport {
     }
     
     /// Cleans up the authenticated session pool
-    private func cleanupSessionPool() {
-        for (_, session) in authenticatedSessionPool {
-            session.invalidateAndCancel()
+    /// Uses async to avoid blocking on network operations during session invalidation
+    private func cleanupSessionPool() async {
+        logger.debug("Cleaning up \(authenticatedSessionPool.count) authenticated sessions")
+        
+        // Invalidate all sessions asynchronously
+        await withTaskGroup(of: Void.self) { group in
+            for (_, session) in authenticatedSessionPool {
+                group.addTask {
+                    // invalidateAndCancel is not async but may perform cleanup operations
+                    // Running it in a task group allows concurrent cleanup
+                    session.invalidateAndCancel()
+                }
+            }
         }
+        
         authenticatedSessionPool.removeAll()
         logger.debug("Cleaned up authenticated session pool")
     }
