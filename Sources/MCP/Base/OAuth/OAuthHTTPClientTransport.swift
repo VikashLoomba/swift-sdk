@@ -302,6 +302,22 @@ public actor OAuthHTTPClientTransport: Transport {
     
     // MARK: - Private Methods
     
+    /// Extract base domain URL from an endpoint URL
+    /// For example: https://example.com/mcp -> https://example.com
+    private func getBaseDomainURL(from url: URL) -> URL? {
+        guard let scheme = url.scheme,
+              let host = url.host else {
+            return nil
+        }
+        
+        var components = URLComponents()
+        components.scheme = scheme
+        components.host = host
+        components.port = url.port
+        
+        return components.url
+    }
+    
     private func isAuthenticationError(_ error: Swift.Error) -> Bool {
         // Check if this is an MCP authentication error
         if let mcpError = error as? MCPError,
@@ -348,7 +364,19 @@ public actor OAuthHTTPClientTransport: Transport {
         }
         
         // Step 2: Fetch protected resource metadata from MCP server
-        let metadata = try await authenticator.fetchProtectedResourceMetadata(from: metadataURL)
+        let metadata: ProtectedResourceMetadata
+        do {
+            metadata = try await authenticator.fetchProtectedResourceMetadata(from: metadataURL)
+        } catch {
+            // If the endpoint-specific URL fails, try the base domain
+            if let baseURL = getBaseDomainURL(from: endpoint) {
+                let baseDomainMetadataURL = baseURL.appendingPathComponent(".well-known/oauth-protected-resource")
+                logger.info("Endpoint metadata failed, trying base domain", metadata: ["url": "\(baseDomainMetadataURL.absoluteString)"])
+                metadata = try await authenticator.fetchProtectedResourceMetadata(from: baseDomainMetadataURL)
+            } else {
+                throw error
+            }
+        }
         
         // Step 3: Select the first authorization server from the metadata
         guard let firstAuthServerString = metadata.authorizationServers.first,
