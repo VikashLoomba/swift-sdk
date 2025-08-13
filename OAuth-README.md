@@ -33,6 +33,12 @@ The MCP Swift SDK includes comprehensive OAuth 2.0 and OAuth 2.1 support for rem
 - **Custom Providers**: Generic factory methods for any OAuth 2.1 provider
 - **Dynamic Registration**: Automatic client registration with any compliant server
 
+### 🔍 MCP OAuth Discovery
+- **WWW-Authenticate Header Parsing**: Automatic extraction of OAuth metadata URLs from 401 responses
+- **Protected Resource Metadata**: Support for RFC 9728 resource metadata discovery
+- **Authorization Server Discovery**: MCP-compliant priority order for discovering OAuth endpoints
+- **Resource Indicators**: RFC 8707 support for targeting specific MCP servers
+
 ## Quick Start
 
 ### OAuth 2.1 Public Client (Recommended)
@@ -119,6 +125,221 @@ let oauthConfig = OAuthConfiguration.confidentialClient(
     usePKCE: true // Optional for confidential clients
 )
 ```
+
+## Connecting to OAuth-Protected MCP Servers
+
+This section demonstrates how a public client can connect to an OAuth-protected MCP server using dynamic registration and automatic discovery.
+
+### Complete Flow: Public Client with Dynamic Registration
+
+This example shows the full flow for a mobile app or SPA connecting to an MCP server that requires OAuth authentication:
+
+```swift
+import MCP
+
+// Step 1: Create a minimal OAuth configuration
+// We'll discover the actual endpoints from the MCP server
+let minimalConfig = try OAuthConfiguration(
+    authorizationEndpoint: URL(string: "https://placeholder")!,
+    tokenEndpoint: URL(string: "https://placeholder")!,
+    clientId: "pending-registration" // Will be replaced after registration
+)
+
+// Step 2: Create OAuth transport pointing to your MCP server
+let mcpServerURL = URL(string: "https://mcp-server.example.com")!
+let transport = OAuthHTTPClientTransport(
+    endpoint: mcpServerURL,
+    oauthConfig: minimalConfig
+)
+
+// Step 3: Attempt to connect - this will trigger OAuth discovery
+let client = Client(name: "MyMobileApp", version: "1.0.0")
+
+do {
+    // This will fail with 401, triggering OAuth discovery
+    try await client.connect(transport: transport)
+} catch {
+    // Expected - the server will return 401 with WWW-Authenticate header
+    print("Initial connection failed, starting OAuth flow...")
+}
+
+// Step 4: The transport automatically extracts OAuth metadata from WWW-Authenticate header
+// The header looks like: Bearer resource_metadata="https://server.com/.well-known/oauth-protected-resource"
+// This happens internally in the transport
+
+// Step 5: Perform dynamic client registration
+let authenticator = transport.authenticator
+
+// Discover OAuth endpoints from the metadata URL
+let discoveryDoc = try await authenticator.discoverAuthorizationServerMetadata(
+    from: URL(string: "https://oauth-server.example.com")!
+)
+
+// Register as a new OAuth client
+let registration = try await authenticator.registerClient(
+    registrationEndpoint: discoveryDoc.registrationEndpoint!,
+    clientName: "My Mobile App",
+    redirectURIs: [URL(string: "myapp://oauth/callback")!],
+    grantTypes: ["authorization_code"],
+    responseTypes: ["code"],
+    scopes: ["mcp:read", "mcp:write"],
+    softwareId: "com.example.myapp",
+    softwareVersion: "1.0.0"
+)
+
+// Step 6: Create new configuration with registered client details
+let registeredConfig = try OAuthConfiguration.publicClient(
+    authorizationEndpoint: discoveryDoc.authorizationEndpoint,
+    tokenEndpoint: discoveryDoc.tokenEndpoint,
+    revocationEndpoint: discoveryDoc.revocationEndpoint,
+    clientId: registration.clientId,
+    scopes: ["mcp:read", "mcp:write"],
+    redirectURI: URL(string: "myapp://oauth/callback")!,
+    resourceIndicator: mcpServerURL.absoluteString // Target this specific MCP server
+)
+
+// Step 7: Update transport with registered configuration
+let registeredTransport = OAuthHTTPClientTransport(
+    endpoint: mcpServerURL,
+    oauthConfig: registeredConfig
+)
+
+// Step 8: Perform OAuth authorization flow
+let pkceState = await authenticator.generatePKCEState()
+let authURL = try await authenticator.generateAuthorizationURL(pkceState: pkceState)
+
+// Step 9: Direct user to authorization URL
+// In a real app, you would open this URL in a browser or web view
+print("Please authorize at: \(authURL)")
+// ... user authorizes and is redirected back with code ...
+
+// Step 10: Exchange authorization code for tokens
+let token = try await authenticator.exchangeAuthorizationCode(
+    code: "received-auth-code",
+    pkceState: pkceState,
+    receivedState: "received-state"
+)
+
+// Step 11: Connect to MCP server with OAuth tokens
+try await client.connect(transport: registeredTransport)
+
+// Now you can use the MCP client normally - all requests are authenticated
+let response = try await client.request(...)
+```
+
+### Simplified Flow Example
+
+Here's how you could structure a helper class to streamline the OAuth flow:
+
+```swift
+import MCP
+
+class MCPOAuthConnector {
+    let mcpServerURL = URL(string: "https://mcp-server.example.com")!
+    let redirectURI = URL(string: "myapp://oauth/callback")!
+    
+    func connectToMCPServer() async throws -> Client {
+        // Step 1: Attempt initial connection to discover OAuth requirements
+        var transport = OAuthHTTPClientTransport(
+            endpoint: mcpServerURL,
+            oauthConfig: try OAuthConfiguration(
+                authorizationEndpoint: URL(string: "https://placeholder")!,
+                tokenEndpoint: URL(string: "https://placeholder")!,
+                clientId: "pending"
+            )
+        )
+        
+        // Step 2: The transport will automatically handle discovery on 401
+        // In a real app, you would handle the OAuth flow here
+        
+        // Step 3: Connect MCP client after OAuth is complete
+        let client = Client(name: "MyApp", version: "1.0.0")
+        try await client.connect(transport: transport)
+        
+        return client
+    }
+    
+    private func handleOAuthFlow(transport: OAuthHTTPClientTransport) async throws {
+        // Handle dynamic registration, authorization, and token exchange
+        // See the complete flow example above for details
+    }
+}
+```
+
+**Note**: The helper methods shown above are illustrative. Use the complete flow example for actual implementation.
+
+### Handling MCP OAuth Discovery
+
+The SDK automatically handles the MCP OAuth discovery process:
+
+1. **Initial Request**: Client attempts to connect to MCP server
+2. **401 Response**: Server returns 401 with WWW-Authenticate header
+3. **Header Parsing**: SDK extracts `resource_metadata` URL from header
+4. **Metadata Fetch**: SDK fetches OAuth protected resource metadata
+5. **Server Discovery**: SDK discovers authorization server from metadata
+6. **Dynamic Registration**: SDK registers client with authorization server
+7. **Authorization Flow**: User authorizes the application
+8. **Token Exchange**: SDK exchanges code for access tokens
+9. **Authenticated Connection**: All subsequent requests include OAuth tokens
+
+### WWW-Authenticate Header Format
+
+MCP servers return OAuth metadata in the WWW-Authenticate header:
+
+```http
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer realm="mcp", 
+    resource_metadata="https://server.com/.well-known/oauth-protected-resource"
+```
+
+The SDK automatically parses this header and uses the `resource_metadata` URL to discover OAuth configuration.
+
+### Protected Resource Metadata
+
+The metadata document at the `resource_metadata` URL contains:
+
+```json
+{
+    "resource": "https://mcp-server.example.com",
+    "authorization_servers": [
+        "https://oauth.example.com",
+        "https://oauth2.example.com"
+    ],
+    "scopes_supported": ["mcp:read", "mcp:write", "mcp:admin"],
+    "bearer_methods_supported": ["header"]
+}
+```
+
+### Authorization Server Discovery Priority
+
+For MCP servers, the SDK tries discovery endpoints in this order:
+
+1. **With Path Components** (e.g., `https://auth.example.com/tenant1`):
+   - `/.well-known/oauth-authorization-server/tenant1`
+   - `/.well-known/openid-configuration/tenant1`
+   - `/tenant1/.well-known/openid-configuration`
+
+2. **Without Path Components** (e.g., `https://auth.example.com`):
+   - `/.well-known/oauth-authorization-server`
+   - `/.well-known/openid-configuration`
+
+### Resource Indicators (RFC 8707)
+
+The SDK includes the MCP server URL as a resource indicator in OAuth requests:
+
+```swift
+// Resource indicator is automatically added to OAuth requests
+let config = try OAuthConfiguration.publicClient(
+    authorizationEndpoint: authEndpoint,
+    tokenEndpoint: tokenEndpoint,
+    clientId: clientId,
+    scopes: ["mcp:read"],
+    redirectURI: redirectURI,
+    resourceIndicator: "https://mcp-server.example.com" // Target MCP server
+)
+```
+
+This ensures tokens are scoped to the specific MCP server.
 
 ## OAuth 2.0 Dynamic Client Registration
 
