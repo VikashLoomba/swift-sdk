@@ -14,7 +14,7 @@ public actor OAuthHTTPClientTransport: Transport {
     internal let endpoint: URL
     
     /// OAuth authenticator for managing tokens
-    private let authenticator: OAuthAuthenticator
+    private var authenticator: OAuthAuthenticator
     
     /// Identifier for token storage (allows multiple token sets)
     private let tokenIdentifier: String
@@ -31,10 +31,50 @@ public actor OAuthHTTPClientTransport: Transport {
     /// Whether streaming is enabled
     private let streaming: Bool
     
-    /// Creates a new OAuth-enabled HTTP transport
+    /// Creates an OAuth-enabled transport for dynamic discovery
+    ///
+    /// Use this when connecting to an MCP server that requires OAuth but you don't have
+    /// configuration yet. The transport will automatically discover OAuth requirements
+    /// from the server's 401 response and guide you through dynamic registration.
     ///
     /// - Parameters:
-    ///   - endpoint: The server URL to connect to
+    ///   - endpoint: The MCP server URL to connect to
+    ///   - tokenStorage: Optional token storage (defaults to platform-appropriate storage)
+    ///   - tokenIdentifier: Identifier for token storage (default: "default")
+    ///   - configuration: URLSession configuration
+    ///   - streaming: Whether to enable SSE streaming
+    ///   - logger: Optional logger instance
+    public static func withDynamicDiscovery(
+        endpoint: URL,
+        tokenStorage: TokenStorage? = nil,
+        tokenIdentifier: String = "default",
+        configuration: URLSessionConfiguration = .default,
+        streaming: Bool = true,
+        logger: Logger? = nil
+    ) -> OAuthHTTPClientTransport {
+        // Create a minimal configuration for discovery
+        // This will be replaced after dynamic registration
+        let discoveryConfig = try! OAuthConfiguration(
+            authorizationEndpoint: URL(string: "https://discovery.pending")!,
+            tokenEndpoint: URL(string: "https://discovery.pending")!,
+            clientId: UUID().uuidString // Temporary ID for discovery
+        )
+        
+        return OAuthHTTPClientTransport(
+            endpoint: endpoint,
+            oauthConfig: discoveryConfig,
+            tokenStorage: tokenStorage,
+            tokenIdentifier: tokenIdentifier,
+            configuration: configuration,
+            streaming: streaming,
+            logger: logger
+        )
+    }
+    
+    /// Creates a new OAuth-enabled HTTP transport for MCP servers
+    ///
+    /// - Parameters:
+    ///   - endpoint: The MCP server URL to connect to
     ///   - oauthConfig: OAuth configuration
     ///   - tokenStorage: Optional token storage (defaults to platform-appropriate storage)
     ///   - tokenIdentifier: Identifier for token storage (default: "default")
@@ -104,30 +144,62 @@ public actor OAuthHTTPClientTransport: Transport {
         logger.debug("Updated base transport with new OAuth token")
     }
     
-    /// Establishes connection with OAuth authentication
+    /// Establishes connection with OAuth authentication for MCP
     public func connect() async throws {
-        logger.info("Connecting OAuth HTTP transport")
+        logger.info("Connecting OAuth HTTP transport to MCP server")
         
-        // Perform initial authentication if needed
-        let token: OAuthToken
+        // Try to get existing valid token first
         do {
-            token = try await authenticator.getValidToken(for: tokenIdentifier)
-            logger.debug("OAuth token available")
+            let token = try await authenticator.getValidToken(for: tokenIdentifier)
+            logger.debug("Existing OAuth token available")
+            
+            // Create base transport with authenticated session
+            updateBaseTransport(with: token)
+            
+            // Connect the base transport
+            guard let transport = baseTransport else {
+                throw MCPError.internalError("Failed to create base transport")
+            }
+            try await transport.connect()
+            
+            logger.info("OAuth HTTP transport connected with existing token")
+            return
         } catch OAuthError.authenticationRequired {
-            logger.info("No valid token found, performing client credentials authentication")
-            token = try await authenticator.authenticateWithClientCredentials(identifier: tokenIdentifier)
+            logger.info("No valid token found, will attempt MCP OAuth discovery on first request")
+            
+            // For MCP, we'll discover OAuth requirements when we get a 401 response
+            // Create an unauthenticated transport for the initial discovery request
+            self.baseTransport = HTTPClientTransport(
+                endpoint: endpoint,
+                session: URLSession(configuration: sessionConfiguration),
+                streaming: streaming,
+                logger: logger
+            )
+            
+            guard let transport = baseTransport else {
+                throw MCPError.internalError("Failed to create base transport")
+            }
+            try await transport.connect()
+            
+            logger.info("OAuth HTTP transport connected, awaiting OAuth discovery")
+        } catch {
+            // For confidential clients, try client credentials flow
+            if await authenticator.configuration.clientType == .confidential {
+                logger.info("Attempting client credentials authentication")
+                let token = try await authenticator.authenticateWithClientCredentials(identifier: tokenIdentifier)
+                
+                updateBaseTransport(with: token)
+                
+                guard let transport = baseTransport else {
+                    throw MCPError.internalError("Failed to create base transport")
+                }
+                try await transport.connect()
+                
+                logger.info("OAuth HTTP transport connected with client credentials")
+            } else {
+                throw error
+            }
         }
-        
-        // Create base transport with authenticated session
-        updateBaseTransport(with: token)
-        
-        // Connect the base transport
-        guard let transport = baseTransport else {
-            throw MCPError.internalError("Failed to create base transport")
-        }
-        try await transport.connect()
-        
-        logger.info("OAuth HTTP transport connected")
     }
     
     /// Disconnects from the transport
@@ -142,18 +214,39 @@ public actor OAuthHTTPClientTransport: Transport {
         self.baseTransport = nil
     }
     
-    /// Sends data with automatic OAuth token injection and refresh
+    /// Sends data with automatic OAuth token injection, refresh, and MCP discovery
     public func send(_ data: Data) async throws {
         guard let transport = baseTransport else {
             throw MCPError.internalError("Transport not connected")
         }
         
-        // Try to send with current token
+        // Try to send with current token (or no token for initial discovery)
         do {
             try await transport.send(data)
         } catch {
-            // Check if this is an authentication error
-            if isAuthenticationError(error) {
+            // Check if this is a 401 authentication error that might trigger MCP OAuth discovery
+            if let mcpError = error as? MCPError,
+               case .internalError(let message) = mcpError,
+               message?.contains("401") == true {
+                
+                logger.info("Received 401 response, attempting MCP OAuth discovery")
+                
+                // Extract WWW-Authenticate header from the error message
+                var wwwAuthenticateHeader: String? = nil
+                if let message = message, message.contains("401 Unauthorized: ") {
+                    // Extract the header value after "401 Unauthorized: "
+                    wwwAuthenticateHeader = String(message.dropFirst("401 Unauthorized: ".count))
+                }
+                
+                try await performMCPOAuthDiscovery(wwwAuthenticateHeader: wwwAuthenticateHeader)
+                
+                // Retry the request with the new token
+                guard let newTransport = baseTransport else {
+                    throw MCPError.internalError("Failed to create transport after OAuth setup")
+                }
+                try await newTransport.send(data)
+                
+            } else if isAuthenticationError(error) {
                 logger.info("Authentication error detected, refreshing token and retrying")
                 
                 // Try to refresh the token
@@ -220,6 +313,222 @@ public actor OAuthHTTPClientTransport: Transport {
         }
         
         return false
+    }
+    
+    /// Perform MCP OAuth discovery and authentication flow
+    private func performMCPOAuthDiscovery(wwwAuthenticateHeader: String? = nil) async throws {
+        logger.info("Starting MCP OAuth discovery process")
+        
+        let (authServerURL, discoveryDocument) = try await discoverOAuthServerMetadata(wwwAuthenticateHeader: wwwAuthenticateHeader)
+        
+        if await authenticator.configuration.clientType == .public {
+            try await handlePublicClientFlow(discoveryDocument: discoveryDocument)
+        } else {
+            try await handleConfidentialClientFlow(discoveryDocument: discoveryDocument)
+        }
+    }
+    
+    private func discoverOAuthServerMetadata(wwwAuthenticateHeader: String? = nil) async throws -> (URL, OAuthDiscoveryDocument) {
+        // Step 1: Try to get metadata URL from WWW-Authenticate header if available
+        var metadataURL: URL
+        
+        if let wwwAuthHeader = wwwAuthenticateHeader {
+            // Parse the WWW-Authenticate header for resource_metadata URL
+            if let parsedURL = try await authenticator.parseWWWAuthenticateHeader(wwwAuthHeader) {
+                logger.info("Found resource metadata URL in WWW-Authenticate header", metadata: ["url": "\(parsedURL.absoluteString)"])
+                metadataURL = parsedURL
+            } else {
+                // Fallback to default well-known location
+                logger.info("No resource_metadata in WWW-Authenticate header, using default location")
+                metadataURL = endpoint.appendingPathComponent(".well-known/oauth-protected-resource")
+            }
+        } else {
+            // No WWW-Authenticate header, use default well-known location
+            metadataURL = endpoint.appendingPathComponent(".well-known/oauth-protected-resource")
+        }
+        
+        // Step 2: Fetch protected resource metadata from MCP server
+        let metadata = try await authenticator.fetchProtectedResourceMetadata(from: metadataURL)
+        
+        // Step 3: Select the first authorization server from the metadata
+        guard let firstAuthServerString = metadata.authorizationServers.first,
+              let authServerURL = URL(string: firstAuthServerString) else {
+            throw OAuthError.authorizationServerNotFound
+        }
+        
+        logger.info("Found authorization server", metadata: ["server": "\(authServerURL.absoluteString)"])
+        
+        // Step 4: Discover authorization server metadata using MCP priority order
+        let discoveryDocument = try await authenticator.discoverAuthorizationServerMetadata(from: authServerURL)
+        
+        // Step 5: Validate PKCE support (required by MCP)
+        try await authenticator.validatePKCESupport(in: discoveryDocument)
+        
+        return (authServerURL, discoveryDocument)
+    }
+    
+    private func handlePublicClientFlow(discoveryDocument: OAuthDiscoveryDocument) async throws {
+        logger.info("Public client detected - authorization code flow with PKCE required")
+        
+        // Generate PKCE state
+        let pkceState = await authenticator.generatePKCEState()
+        
+        // Create a new configuration with the discovered endpoints and resource indicator
+        let currentConfig = await authenticator.configuration
+        let mcpConfig = try createMCPConfiguration(
+            from: discoveryDocument,
+            basedOn: currentConfig,
+            usePKCE: true,
+            includeRedirectURI: true
+        )
+        
+        // Update authenticator with new configuration
+        let newAuthenticator = try await createAuthenticator(with: mcpConfig)
+        
+        // Generate authorization URL
+        let authURL = try await newAuthenticator.generateAuthorizationURL(pkceState: pkceState)
+        
+        // For now, throw an error indicating manual authorization is needed
+        // In a real implementation, this would open a browser or return the URL to the caller
+        logger.error("Manual authorization required", metadata: ["authURL": "\(authURL.absoluteString)"])
+        throw OAuthError.authenticationRequired
+    }
+    
+    private func handleConfidentialClientFlow(discoveryDocument: OAuthDiscoveryDocument) async throws {
+        logger.info("Confidential client detected - using client credentials flow")
+        
+        // Create authenticator with discovered endpoints and resource indicator
+        let originalConfig = await authenticator.configuration
+        let mcpConfig = try createMCPConfiguration(
+            from: discoveryDocument,
+            basedOn: originalConfig,
+            usePKCE: false,
+            includeRedirectURI: false
+        )
+        
+        let mcpAuthenticator = try await createAuthenticator(with: mcpConfig)
+        
+        // Perform client credentials authentication
+        let token = try await mcpAuthenticator.authenticateWithClientCredentials(identifier: tokenIdentifier)
+        
+        // Update transport and reconnect
+        try await updateTransportWithToken(token)
+        
+        logger.info("MCP OAuth discovery and authentication completed")
+    }
+    
+    private func createMCPConfiguration(
+        from discoveryDocument: OAuthDiscoveryDocument,
+        basedOn originalConfig: OAuthConfiguration,
+        usePKCE: Bool,
+        includeRedirectURI: Bool
+    ) throws -> OAuthConfiguration {
+        return try OAuthConfiguration(
+            authorizationEndpoint: discoveryDocument.authorizationEndpoint,
+            tokenEndpoint: discoveryDocument.tokenEndpoint,
+            revocationEndpoint: discoveryDocument.revocationEndpoint,
+            clientId: originalConfig.clientId,
+            clientSecret: originalConfig.clientSecret,
+            clientType: originalConfig.clientType,
+            scopes: originalConfig.scopes,
+            redirectURI: includeRedirectURI ? originalConfig.redirectURI : nil,
+            usePKCE: usePKCE,
+            resourceIndicator: endpoint.absoluteString  // MCP server as resource
+        )
+    }
+    
+    /// Performs dynamic client registration and updates the transport configuration
+    ///
+    /// Call this after receiving a 401 response to register your client and get OAuth credentials.
+    ///
+    /// - Parameters:
+    ///   - clientName: Human-readable name for your application
+    ///   - redirectURIs: Redirect URIs for OAuth callbacks
+    ///   - scopes: OAuth scopes to request
+    ///   - softwareId: Optional software identifier
+    ///   - softwareVersion: Optional software version
+    /// - Returns: The registered OAuth configuration
+    public func performDynamicRegistration(
+        clientName: String,
+        redirectURIs: [URL],
+        scopes: [String] = [],
+        softwareId: String? = nil,
+        softwareVersion: String? = nil
+    ) async throws -> OAuthConfiguration {
+        logger.info("Starting dynamic client registration")
+        
+        // The discovery should have already happened via performMCPOAuthDiscovery
+        // Now we need to register the client
+        
+        // Get the current discovery document (should be cached from discovery)
+        // For now, we'll need to re-discover - in a production implementation,
+        // we'd cache the discovery document
+        let (_, discoveryDocument) = try await discoverOAuthServerMetadata()
+        
+        // Check if registration endpoint exists
+        guard let registrationEndpoint = discoveryDocument.registrationEndpoint else {
+            throw OAuthError.registrationEndpointNotFound
+        }
+        
+        // Register the client
+        let registration = try await authenticator.registerClient(
+            registrationEndpoint: registrationEndpoint,
+            clientName: clientName,
+            redirectURIs: redirectURIs,
+            grantTypes: ["authorization_code"],
+            responseTypes: ["code"],
+            scopes: scopes,
+            softwareId: softwareId,
+            softwareVersion: softwareVersion
+        )
+        
+        // Create new configuration with registered client details
+        let newConfig = try OAuthConfiguration(
+            authorizationEndpoint: discoveryDocument.authorizationEndpoint,
+            tokenEndpoint: discoveryDocument.tokenEndpoint,
+            revocationEndpoint: discoveryDocument.revocationEndpoint,
+            clientId: registration.clientId,
+            clientSecret: registration.clientSecret, // Will be nil for public clients
+            scopes: scopes,
+            redirectURI: redirectURIs.first,
+            resourceIndicator: endpoint.absoluteString
+        )
+        
+        // Update the authenticator with the new configuration
+        self.authenticator = OAuthAuthenticator(
+            configuration: newConfig,
+            tokenStorage: await authenticator.tokenStorage,
+            urlSession: await authenticator.urlSession,
+            logger: await authenticator.logger
+        )
+        
+        logger.info("Dynamic registration complete", metadata: ["clientId": "\(registration.clientId)"])
+        return newConfig
+    }
+    
+    private func createAuthenticator(with configuration: OAuthConfiguration) async throws -> OAuthAuthenticator {
+        return OAuthAuthenticator(
+            configuration: configuration,
+            tokenStorage: await authenticator.tokenStorage,
+            urlSession: await authenticator.urlSession,
+            logger: await authenticator.logger
+        )
+    }
+    
+    private func updateTransportWithToken(_ token: OAuthToken) async throws {
+        // Disconnect old transport
+        if let oldTransport = baseTransport {
+            await oldTransport.disconnect()
+        }
+        
+        // Update transport with new token
+        updateBaseTransport(with: token)
+        
+        // Reconnect with new token
+        guard let newTransport = baseTransport else {
+            throw MCPError.internalError("Failed to create transport with new token")
+        }
+        try await newTransport.connect()
     }
 }
 
