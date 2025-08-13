@@ -137,91 +137,52 @@ This example shows the full flow for a mobile app or SPA connecting to an MCP se
 ```swift
 import MCP
 
-// Step 1: Create a minimal OAuth configuration
-// We'll discover the actual endpoints from the MCP server
-let minimalConfig = try OAuthConfiguration(
-    authorizationEndpoint: URL(string: "https://placeholder")!,
-    tokenEndpoint: URL(string: "https://placeholder")!,
-    clientId: "pending-registration" // Will be replaced after registration
-)
-
-// Step 2: Create OAuth transport pointing to your MCP server
+// Step 1: Create OAuth transport with dynamic discovery - no configuration needed!
 let mcpServerURL = URL(string: "https://mcp-server.example.com")!
-let transport = OAuthHTTPClientTransport(
-    endpoint: mcpServerURL,
-    oauthConfig: minimalConfig
+let transport = OAuthHTTPClientTransport.withDynamicDiscovery(
+    endpoint: mcpServerURL
 )
 
-// Step 3: Attempt to connect - this will trigger OAuth discovery
+// Step 2: Attempt to connect - this will trigger OAuth discovery
 let client = Client(name: "MyMobileApp", version: "1.0.0")
 
 do {
-    // This will fail with 401, triggering OAuth discovery
     try await client.connect(transport: transport)
 } catch {
-    // Expected - the server will return 401 with WWW-Authenticate header
-    print("Initial connection failed, starting OAuth flow...")
+    // Server returned 401 with WWW-Authenticate header
+    // The transport automatically extracted the OAuth metadata URL
+    print("Server requires OAuth, proceeding with registration...")
 }
 
-// Step 4: The transport automatically extracts OAuth metadata from WWW-Authenticate header
-// The header looks like: Bearer resource_metadata="https://server.com/.well-known/oauth-protected-resource"
-// This happens internally in the transport
-
-// Step 5: Perform dynamic client registration
-let authenticator = transport.authenticator
-
-// Discover OAuth endpoints from the metadata URL
-let discoveryDoc = try await authenticator.discoverAuthorizationServerMetadata(
-    from: URL(string: "https://oauth-server.example.com")!
-)
-
-// Register as a new OAuth client
-let registration = try await authenticator.registerClient(
-    registrationEndpoint: discoveryDoc.registrationEndpoint!,
+// Step 3: Perform dynamic client registration
+let oauthConfig = try await transport.performDynamicRegistration(
     clientName: "My Mobile App",
     redirectURIs: [URL(string: "myapp://oauth/callback")!],
-    grantTypes: ["authorization_code"],
-    responseTypes: ["code"],
     scopes: ["mcp:read", "mcp:write"],
     softwareId: "com.example.myapp",
     softwareVersion: "1.0.0"
 )
 
-// Step 6: Create new configuration with registered client details
-let registeredConfig = try OAuthConfiguration.publicClient(
-    authorizationEndpoint: discoveryDoc.authorizationEndpoint,
-    tokenEndpoint: discoveryDoc.tokenEndpoint,
-    revocationEndpoint: discoveryDoc.revocationEndpoint,
-    clientId: registration.clientId,
-    scopes: ["mcp:read", "mcp:write"],
-    redirectURI: URL(string: "myapp://oauth/callback")!,
-    resourceIndicator: mcpServerURL.absoluteString // Target this specific MCP server
-)
+// Step 4: Perform OAuth authorization flow with PKCE (required for public clients)
+// The transport's authenticator now has the registered configuration
+let pkceState = await transport.authenticator.generatePKCEState()
+let authURL = try await transport.authenticator.generateAuthorizationURL(pkceState: pkceState)
 
-// Step 7: Update transport with registered configuration
-let registeredTransport = OAuthHTTPClientTransport(
-    endpoint: mcpServerURL,
-    oauthConfig: registeredConfig
-)
-
-// Step 8: Perform OAuth authorization flow
-let pkceState = await authenticator.generatePKCEState()
-let authURL = try await authenticator.generateAuthorizationURL(pkceState: pkceState)
-
-// Step 9: Direct user to authorization URL
+// Step 5: Direct user to authorization URL
 // In a real app, you would open this URL in a browser or web view
 print("Please authorize at: \(authURL)")
 // ... user authorizes and is redirected back with code ...
 
-// Step 10: Exchange authorization code for tokens
-let token = try await authenticator.exchangeAuthorizationCode(
+// Step 6: Exchange authorization code for tokens
+let token = try await transport.authenticator.exchangeAuthorizationCode(
     code: "received-auth-code",
     pkceState: pkceState,
     receivedState: "received-state"
 )
 
-// Step 11: Connect to MCP server with OAuth tokens
-try await client.connect(transport: registeredTransport)
+// Step 7: Connect to MCP server with OAuth tokens
+// The transport is now fully configured and authenticated
+try await client.connect(transport: transport)
 
 // Now you can use the MCP client normally - all requests are authenticated
 let response = try await client.request(...)
@@ -239,23 +200,25 @@ class MCPOAuthConnector {
     let redirectURI = URL(string: "myapp://oauth/callback")!
     
     func connectToMCPServer() async throws -> Client {
-        // Step 1: Attempt initial connection to discover OAuth requirements
-        var transport = OAuthHTTPClientTransport(
-            endpoint: mcpServerURL,
-            oauthConfig: try OAuthConfiguration(
-                authorizationEndpoint: URL(string: "https://placeholder")!,
-                tokenEndpoint: URL(string: "https://placeholder")!,
-                clientId: "pending"
-            )
-        )
-        
-        // Step 2: The transport will automatically handle discovery on 401
-        // In a real app, you would handle the OAuth flow here
-        
-        // Step 3: Connect MCP client after OAuth is complete
+        // Step 1: Try connecting without OAuth first
+        let httpTransport = HTTPClientTransport(endpoint: mcpServerURL)
         let client = Client(name: "MyApp", version: "1.0.0")
-        try await client.connect(transport: transport)
         
+        do {
+            try await client.connect(transport: httpTransport)
+            return client // Server doesn't require OAuth
+        } catch {
+            // Server requires OAuth - proceed with discovery
+        }
+        
+        // Step 2: Extract OAuth metadata URL from WWW-Authenticate header
+        // Parse error message for resource_metadata URL
+        
+        // Step 3: Perform dynamic registration and create OAuth transport
+        let oauthTransport = try await setupOAuthTransport()
+        
+        // Step 4: Connect with OAuth
+        try await client.connect(transport: oauthTransport)
         return client
     }
     
@@ -266,7 +229,7 @@ class MCPOAuthConnector {
 }
 ```
 
-**Note**: The helper methods shown above are illustrative. Use the complete flow example for actual implementation.
+**Note**: The simplified example above shows the concept. The `withDynamicDiscovery` method and `performDynamicRegistration` are now available in the SDK to handle the discovery flow without requiring an initial OAuth configuration.
 
 ### Handling MCP OAuth Discovery
 

@@ -14,7 +14,7 @@ public actor OAuthHTTPClientTransport: Transport {
     internal let endpoint: URL
     
     /// OAuth authenticator for managing tokens
-    private let authenticator: OAuthAuthenticator
+    private var authenticator: OAuthAuthenticator
     
     /// Identifier for token storage (allows multiple token sets)
     private let tokenIdentifier: String
@@ -30,6 +30,46 @@ public actor OAuthHTTPClientTransport: Transport {
     
     /// Whether streaming is enabled
     private let streaming: Bool
+    
+    /// Creates an OAuth-enabled transport for dynamic discovery
+    ///
+    /// Use this when connecting to an MCP server that requires OAuth but you don't have
+    /// configuration yet. The transport will automatically discover OAuth requirements
+    /// from the server's 401 response and guide you through dynamic registration.
+    ///
+    /// - Parameters:
+    ///   - endpoint: The MCP server URL to connect to
+    ///   - tokenStorage: Optional token storage (defaults to platform-appropriate storage)
+    ///   - tokenIdentifier: Identifier for token storage (default: "default")
+    ///   - configuration: URLSession configuration
+    ///   - streaming: Whether to enable SSE streaming
+    ///   - logger: Optional logger instance
+    public static func withDynamicDiscovery(
+        endpoint: URL,
+        tokenStorage: TokenStorage? = nil,
+        tokenIdentifier: String = "default",
+        configuration: URLSessionConfiguration = .default,
+        streaming: Bool = true,
+        logger: Logger? = nil
+    ) -> OAuthHTTPClientTransport {
+        // Create a minimal configuration for discovery
+        // This will be replaced after dynamic registration
+        let discoveryConfig = try! OAuthConfiguration(
+            authorizationEndpoint: URL(string: "https://discovery.pending")!,
+            tokenEndpoint: URL(string: "https://discovery.pending")!,
+            clientId: UUID().uuidString // Temporary ID for discovery
+        )
+        
+        return OAuthHTTPClientTransport(
+            endpoint: endpoint,
+            oauthConfig: discoveryConfig,
+            tokenStorage: tokenStorage,
+            tokenIdentifier: tokenIdentifier,
+            configuration: configuration,
+            streaming: streaming,
+            logger: logger
+        )
+    }
     
     /// Creates a new OAuth-enabled HTTP transport for MCP servers
     ///
@@ -395,6 +435,75 @@ public actor OAuthHTTPClientTransport: Transport {
             usePKCE: usePKCE,
             resourceIndicator: endpoint.absoluteString  // MCP server as resource
         )
+    }
+    
+    /// Performs dynamic client registration and updates the transport configuration
+    ///
+    /// Call this after receiving a 401 response to register your client and get OAuth credentials.
+    ///
+    /// - Parameters:
+    ///   - clientName: Human-readable name for your application
+    ///   - redirectURIs: Redirect URIs for OAuth callbacks
+    ///   - scopes: OAuth scopes to request
+    ///   - softwareId: Optional software identifier
+    ///   - softwareVersion: Optional software version
+    /// - Returns: The registered OAuth configuration
+    public func performDynamicRegistration(
+        clientName: String,
+        redirectURIs: [URL],
+        scopes: [String] = [],
+        softwareId: String? = nil,
+        softwareVersion: String? = nil
+    ) async throws -> OAuthConfiguration {
+        logger.info("Starting dynamic client registration")
+        
+        // The discovery should have already happened via performMCPOAuthDiscovery
+        // Now we need to register the client
+        
+        // Get the current discovery document (should be cached from discovery)
+        // For now, we'll need to re-discover - in a production implementation,
+        // we'd cache the discovery document
+        let (_, discoveryDocument) = try await discoverOAuthServerMetadata()
+        
+        // Check if registration endpoint exists
+        guard let registrationEndpoint = discoveryDocument.registrationEndpoint else {
+            throw OAuthError.registrationEndpointNotFound
+        }
+        
+        // Register the client
+        let registration = try await authenticator.registerClient(
+            registrationEndpoint: registrationEndpoint,
+            clientName: clientName,
+            redirectURIs: redirectURIs,
+            grantTypes: ["authorization_code"],
+            responseTypes: ["code"],
+            scopes: scopes,
+            softwareId: softwareId,
+            softwareVersion: softwareVersion
+        )
+        
+        // Create new configuration with registered client details
+        let newConfig = try OAuthConfiguration(
+            authorizationEndpoint: discoveryDocument.authorizationEndpoint,
+            tokenEndpoint: discoveryDocument.tokenEndpoint,
+            revocationEndpoint: discoveryDocument.revocationEndpoint,
+            clientId: registration.clientId,
+            clientSecret: registration.clientSecret, // Will be nil for public clients
+            scopes: scopes,
+            redirectURI: redirectURIs.first,
+            resourceIndicator: endpoint.absoluteString
+        )
+        
+        // Update the authenticator with the new configuration
+        self.authenticator = OAuthAuthenticator(
+            configuration: newConfig,
+            tokenStorage: await authenticator.tokenStorage,
+            urlSession: await authenticator.urlSession,
+            logger: await authenticator.logger
+        )
+        
+        logger.info("Dynamic registration complete", metadata: ["clientId": "\(registration.clientId)"])
+        return newConfig
     }
     
     private func createAuthenticator(with configuration: OAuthConfiguration) async throws -> OAuthAuthenticator {
