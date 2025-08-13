@@ -15,10 +15,10 @@ import CommonCrypto
 
 /// Actor responsible for OAuth authentication and token management
 public actor OAuthAuthenticator {
-    public let configuration: OAuthConfiguration
-    public let tokenStorage: TokenStorage
-    public let urlSession: URLSession
-    public let logger: Logger
+    internal let configuration: OAuthConfiguration
+    internal let tokenStorage: TokenStorage
+    internal let urlSession: URLSession
+    internal let logger: Logger
     
     /// Current cached token
     private var currentToken: OAuthToken?
@@ -683,7 +683,6 @@ public actor OAuthAuthenticator {
         }
         return Data(hash)
     }
-    #endif
     #endif
     
     /// Generate a cryptographically secure state parameter for CSRF protection

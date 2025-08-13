@@ -274,6 +274,16 @@ public actor OAuthHTTPClientTransport: Transport {
     private func performMCPOAuthDiscovery() async throws {
         logger.info("Starting MCP OAuth discovery process")
         
+        let (authServerURL, discoveryDocument) = try await discoverOAuthServerMetadata()
+        
+        if await authenticator.configuration.clientType == .public {
+            try await handlePublicClientFlow(discoveryDocument: discoveryDocument)
+        } else {
+            try await handleConfidentialClientFlow(discoveryDocument: discoveryDocument)
+        }
+    }
+    
+    private func discoverOAuthServerMetadata() async throws -> (URL, AuthorizationServerMetadata) {
         // Step 1: Fetch protected resource metadata from MCP server
         let metadataURL = endpoint.appendingPathComponent(".well-known/oauth-protected-resource")
         let metadata = try await authenticator.fetchProtectedResourceMetadata(from: metadataURL)
@@ -292,87 +302,102 @@ public actor OAuthHTTPClientTransport: Transport {
         // Step 4: Validate PKCE support (required by MCP)
         try authenticator.validatePKCESupport(in: discoveryDocument)
         
-        // Step 5: For public clients, perform authorization code flow with PKCE
-        if await authenticator.configuration.clientType == .public {
-            logger.info("Public client detected - authorization code flow with PKCE required")
-            
-            // Generate PKCE state
-            let pkceState = await authenticator.generatePKCEState()
-            
-            // Create a new configuration with the discovered endpoints and resource indicator
-            let currentConfig = await authenticator.configuration
-            let mcpConfig = try OAuthConfiguration(
-                authorizationEndpoint: discoveryDocument.authorizationEndpoint,
-                tokenEndpoint: discoveryDocument.tokenEndpoint,
-                revocationEndpoint: discoveryDocument.revocationEndpoint,
-                clientId: currentConfig.clientId,
-                clientSecret: currentConfig.clientSecret,
-                clientType: currentConfig.clientType,
-                scopes: currentConfig.scopes,
-                redirectURI: currentConfig.redirectURI,
-                usePKCE: true,
-                resourceIndicator: endpoint.absoluteString  // MCP server as resource
-            )
-            
-            // Update authenticator with new configuration
-            let newAuthenticator = OAuthAuthenticator(
-                configuration: mcpConfig,
-                tokenStorage: await authenticator.tokenStorage,
-                urlSession: await authenticator.urlSession,
-                logger: await authenticator.logger
-            )
-            
-            // Generate authorization URL
-            let authURL = try await newAuthenticator.generateAuthorizationURL(pkceState: pkceState)
-            
-            // For now, throw an error indicating manual authorization is needed
-            // In a real implementation, this would open a browser or return the URL to the caller
-            logger.error("Manual authorization required", metadata: ["authURL": "\(authURL.absoluteString)"])
-            throw OAuthError.authenticationRequired
-            
-        } else {
-            // Step 6: For confidential clients, use client credentials flow
-            logger.info("Confidential client detected - using client credentials flow")
-            
-            // Create authenticator with discovered endpoints and resource indicator
-            let originalConfig = await authenticator.configuration
-            let mcpConfig = try OAuthConfiguration(
-                authorizationEndpoint: discoveryDocument.authorizationEndpoint,
-                tokenEndpoint: discoveryDocument.tokenEndpoint,
-                revocationEndpoint: discoveryDocument.revocationEndpoint,
-                clientId: originalConfig.clientId,
-                clientSecret: originalConfig.clientSecret,
-                clientType: originalConfig.clientType,
-                scopes: originalConfig.scopes,
-                resourceIndicator: endpoint.absoluteString  // MCP server as resource
-            )
-            
-            let mcpAuthenticator = OAuthAuthenticator(
-                configuration: mcpConfig,
-                tokenStorage: await authenticator.tokenStorage,
-                urlSession: await authenticator.urlSession,
-                logger: await authenticator.logger
-            )
-            
-            // Perform client credentials authentication
-            let token = try await mcpAuthenticator.authenticateWithClientCredentials(identifier: tokenIdentifier)
-            
-            // Disconnect old transport
-            if let oldTransport = baseTransport {
-                await oldTransport.disconnect()
-            }
-            
-            // Update transport with new token
-            updateBaseTransport(with: token)
-            
-            // Reconnect with new token
-            guard let newTransport = baseTransport else {
-                throw MCPError.internalError("Failed to create transport with new token")
-            }
-            try await newTransport.connect()
-            
-            logger.info("MCP OAuth discovery and authentication completed")
+        return (authServerURL, discoveryDocument)
+    }
+    
+    private func handlePublicClientFlow(discoveryDocument: AuthorizationServerMetadata) async throws {
+        logger.info("Public client detected - authorization code flow with PKCE required")
+        
+        // Generate PKCE state
+        let pkceState = await authenticator.generatePKCEState()
+        
+        // Create a new configuration with the discovered endpoints and resource indicator
+        let currentConfig = await authenticator.configuration
+        let mcpConfig = try createMCPConfiguration(
+            from: discoveryDocument,
+            basedOn: currentConfig,
+            usePKCE: true,
+            includeRedirectURI: true
+        )
+        
+        // Update authenticator with new configuration
+        let newAuthenticator = try await createAuthenticator(with: mcpConfig)
+        
+        // Generate authorization URL
+        let authURL = try await newAuthenticator.generateAuthorizationURL(pkceState: pkceState)
+        
+        // For now, throw an error indicating manual authorization is needed
+        // In a real implementation, this would open a browser or return the URL to the caller
+        logger.error("Manual authorization required", metadata: ["authURL": "\(authURL.absoluteString)"])
+        throw OAuthError.authenticationRequired
+    }
+    
+    private func handleConfidentialClientFlow(discoveryDocument: AuthorizationServerMetadata) async throws {
+        logger.info("Confidential client detected - using client credentials flow")
+        
+        // Create authenticator with discovered endpoints and resource indicator
+        let originalConfig = await authenticator.configuration
+        let mcpConfig = try createMCPConfiguration(
+            from: discoveryDocument,
+            basedOn: originalConfig,
+            usePKCE: false,
+            includeRedirectURI: false
+        )
+        
+        let mcpAuthenticator = try await createAuthenticator(with: mcpConfig)
+        
+        // Perform client credentials authentication
+        let token = try await mcpAuthenticator.authenticateWithClientCredentials(identifier: tokenIdentifier)
+        
+        // Update transport and reconnect
+        try await updateTransportWithToken(token)
+        
+        logger.info("MCP OAuth discovery and authentication completed")
+    }
+    
+    private func createMCPConfiguration(
+        from discoveryDocument: AuthorizationServerMetadata,
+        basedOn originalConfig: OAuthConfiguration,
+        usePKCE: Bool,
+        includeRedirectURI: Bool
+    ) throws -> OAuthConfiguration {
+        return try OAuthConfiguration(
+            authorizationEndpoint: discoveryDocument.authorizationEndpoint,
+            tokenEndpoint: discoveryDocument.tokenEndpoint,
+            revocationEndpoint: discoveryDocument.revocationEndpoint,
+            clientId: originalConfig.clientId,
+            clientSecret: originalConfig.clientSecret,
+            clientType: originalConfig.clientType,
+            scopes: originalConfig.scopes,
+            redirectURI: includeRedirectURI ? originalConfig.redirectURI : nil,
+            usePKCE: usePKCE,
+            resourceIndicator: endpoint.absoluteString  // MCP server as resource
+        )
+    }
+    
+    private func createAuthenticator(with configuration: OAuthConfiguration) async throws -> OAuthAuthenticator {
+        return OAuthAuthenticator(
+            configuration: configuration,
+            tokenStorage: await authenticator.tokenStorage,
+            urlSession: await authenticator.urlSession,
+            logger: await authenticator.logger
+        )
+    }
+    
+    private func updateTransportWithToken(_ token: OAuthToken) async throws {
+        // Disconnect old transport
+        if let oldTransport = baseTransport {
+            await oldTransport.disconnect()
         }
+        
+        // Update transport with new token
+        updateBaseTransport(with: token)
+        
+        // Reconnect with new token
+        guard let newTransport = baseTransport else {
+            throw MCPError.internalError("Failed to create transport with new token")
+        }
+        try await newTransport.connect()
     }
 }
 
