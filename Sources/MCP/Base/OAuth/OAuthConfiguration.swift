@@ -151,10 +151,16 @@ extension OAuthConfiguration {
     ) throws -> OAuthConfiguration {
         let clientType: OAuthClientType = clientSecret != nil ? .confidential : .public
         
+        guard let authEndpoint = URL(string: "https://github.com/login/oauth/authorize"),
+              let tokenEndpoint = URL(string: "https://github.com/login/oauth/access_token"),
+              let revocationEndpoint = URL(string: "https://github.com/settings/connections/applications/\(clientId)") else {
+            throw OAuthError.invalidConfiguration("Invalid GitHub OAuth endpoints")
+        }
+        
         return try OAuthConfiguration(
-            authorizationEndpoint: URL(string: "https://github.com/login/oauth/authorize")!,
-            tokenEndpoint: URL(string: "https://github.com/login/oauth/access_token")!,
-            revocationEndpoint: URL(string: "https://github.com/settings/connections/applications/\(clientId)")!,
+            authorizationEndpoint: authEndpoint,
+            tokenEndpoint: tokenEndpoint,
+            revocationEndpoint: revocationEndpoint,
             clientId: clientId,
             clientSecret: clientSecret,
             clientType: clientType,
@@ -174,10 +180,16 @@ extension OAuthConfiguration {
     ) throws -> OAuthConfiguration {
         let clientType: OAuthClientType = clientSecret != nil ? .confidential : .public
         
+        guard let authEndpoint = URL(string: "https://accounts.google.com/o/oauth2/v2/auth"),
+              let tokenEndpoint = URL(string: "https://oauth2.googleapis.com/token"),
+              let revocationEndpoint = URL(string: "https://oauth2.googleapis.com/revoke") else {
+            throw OAuthError.invalidConfiguration("Invalid Google OAuth endpoints")
+        }
+        
         return try OAuthConfiguration(
-            authorizationEndpoint: URL(string: "https://accounts.google.com/o/oauth2/v2/auth")!,
-            tokenEndpoint: URL(string: "https://oauth2.googleapis.com/token")!,
-            revocationEndpoint: URL(string: "https://oauth2.googleapis.com/revoke")!,
+            authorizationEndpoint: authEndpoint,
+            tokenEndpoint: tokenEndpoint,
+            revocationEndpoint: revocationEndpoint,
             clientId: clientId,
             clientSecret: clientSecret,
             clientType: clientType,
@@ -198,10 +210,16 @@ extension OAuthConfiguration {
     ) throws -> OAuthConfiguration {
         let clientType: OAuthClientType = clientSecret != nil ? .confidential : .public
         
+        guard let authEndpoint = URL(string: "https://login.microsoftonline.com/\(tenantId)/oauth2/v2.0/authorize"),
+              let tokenEndpoint = URL(string: "https://login.microsoftonline.com/\(tenantId)/oauth2/v2.0/token"),
+              let revocationEndpoint = URL(string: "https://login.microsoftonline.com/\(tenantId)/oauth2/v2.0/logout") else {
+            throw OAuthError.invalidConfiguration("Invalid Microsoft OAuth endpoints for tenant: \(tenantId)")
+        }
+        
         return try OAuthConfiguration(
-            authorizationEndpoint: URL(string: "https://login.microsoftonline.com/\(tenantId)/oauth2/v2.0/authorize")!,
-            tokenEndpoint: URL(string: "https://login.microsoftonline.com/\(tenantId)/oauth2/v2.0/token")!,
-            revocationEndpoint: URL(string: "https://login.microsoftonline.com/\(tenantId)/oauth2/v2.0/logout")!,
+            authorizationEndpoint: authEndpoint,
+            tokenEndpoint: tokenEndpoint,
+            revocationEndpoint: revocationEndpoint,
             clientId: clientId,
             clientSecret: clientSecret,
             clientType: clientType,

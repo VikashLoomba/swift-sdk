@@ -315,7 +315,6 @@ public actor OAuthHTTPClientTransport: Transport {
             )
             
             // Update authenticator with new configuration
-            let currentConfig = await authenticator.configuration
             let newAuthenticator = OAuthAuthenticator(
                 configuration: mcpConfig,
                 tokenStorage: await authenticator.tokenStorage,
@@ -336,15 +335,15 @@ public actor OAuthHTTPClientTransport: Transport {
             logger.info("Confidential client detected - using client credentials flow")
             
             // Create authenticator with discovered endpoints and resource indicator
-            let currentConfig = await authenticator.configuration
+            let originalConfig = await authenticator.configuration
             let mcpConfig = try OAuthConfiguration(
                 authorizationEndpoint: discoveryDocument.authorizationEndpoint,
                 tokenEndpoint: discoveryDocument.tokenEndpoint,
                 revocationEndpoint: discoveryDocument.revocationEndpoint,
-                clientId: currentConfig.clientId,
-                clientSecret: currentConfig.clientSecret,
-                clientType: currentConfig.clientType,
-                scopes: currentConfig.scopes,
+                clientId: originalConfig.clientId,
+                clientSecret: originalConfig.clientSecret,
+                clientType: originalConfig.clientType,
+                scopes: originalConfig.scopes,
                 resourceIndicator: endpoint.absoluteString  // MCP server as resource
             )
             

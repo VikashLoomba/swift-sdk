@@ -671,9 +671,6 @@ public actor OAuthAuthenticator {
         // Fallback implementation for platforms with CommonCrypto
         let digest = sha256Fallback(data)
         return digest.base64URLEncodedString()
-        #else
-        // This should not be reached due to the compile-time check above
-        return input
         #endif
     }
     
