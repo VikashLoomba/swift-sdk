@@ -26,7 +26,7 @@ public enum OAuthClientType: Sendable {
     case `public`
 }
 
-/// Configuration for OAuth 2.0/2.1 authentication
+/// Configuration for OAuth 2.0/2.1 authentication with MCP support
 public struct OAuthConfiguration: Sendable {
     /// The authorization endpoint URL
     public let authorizationEndpoint: URL
@@ -61,6 +61,9 @@ public struct OAuthConfiguration: Sendable {
     /// PKCE code challenge method (S256 recommended)
     public let pkceCodeChallengeMethod: PKCECodeChallengeMethod
     
+    /// Resource parameter for RFC 8707 Resource Indicators (MCP requirement)
+    public let resourceIndicator: String?
+    
     public init(
         authorizationEndpoint: URL,
         tokenEndpoint: URL,
@@ -72,7 +75,8 @@ public struct OAuthConfiguration: Sendable {
         redirectURI: URL? = nil,
         additionalParameters: [String: String]? = nil,
         usePKCE: Bool? = nil,
-        pkceCodeChallengeMethod: PKCECodeChallengeMethod = .S256
+        pkceCodeChallengeMethod: PKCECodeChallengeMethod = .S256,
+        resourceIndicator: String? = nil
     ) throws {
         self.authorizationEndpoint = authorizationEndpoint
         self.tokenEndpoint = tokenEndpoint
@@ -109,6 +113,9 @@ public struct OAuthConfiguration: Sendable {
             self.pkceCodeChallengeMethod = pkceCodeChallengeMethod
         }
         #endif
+        
+        // MCP OAuth Resource Indicator (RFC 8707)
+        self.resourceIndicator = resourceIndicator
         
         // Validate OAuth 2.1 requirements
         if self.clientType == .public && clientSecret != nil {
@@ -204,7 +211,7 @@ extension OAuthConfiguration {
         )
     }
     
-    /// Generic OAuth 2.1 public client configuration with mandatory PKCE
+    /// Generic OAuth 2.1 public client configuration with mandatory PKCE for MCP
     public static func publicClient(
         authorizationEndpoint: URL,
         tokenEndpoint: URL,
@@ -212,7 +219,8 @@ extension OAuthConfiguration {
         clientId: String,
         scopes: [String] = [],
         redirectURI: URL,
-        additionalParameters: [String: String]? = nil
+        additionalParameters: [String: String]? = nil,
+        resourceIndicator: String? = nil
     ) throws -> OAuthConfiguration {
         return try OAuthConfiguration(
             authorizationEndpoint: authorizationEndpoint,
@@ -225,11 +233,12 @@ extension OAuthConfiguration {
             redirectURI: redirectURI,
             additionalParameters: additionalParameters,
             usePKCE: true,  // OAuth 2.1 mandatory for public clients
-            pkceCodeChallengeMethod: .S256  // Will fallback to .plain if crypto unavailable
+            pkceCodeChallengeMethod: .S256,  // Will fallback to .plain if crypto unavailable
+            resourceIndicator: resourceIndicator
         )
     }
     
-    /// Generic OAuth 2.1 confidential client configuration
+    /// Generic OAuth 2.1 confidential client configuration for MCP
     public static func confidentialClient(
         authorizationEndpoint: URL,
         tokenEndpoint: URL,
@@ -239,7 +248,8 @@ extension OAuthConfiguration {
         scopes: [String] = [],
         redirectURI: URL? = nil,
         additionalParameters: [String: String]? = nil,
-        usePKCE: Bool = false
+        usePKCE: Bool = false,
+        resourceIndicator: String? = nil
     ) throws -> OAuthConfiguration {
         return try OAuthConfiguration(
             authorizationEndpoint: authorizationEndpoint,
@@ -252,7 +262,8 @@ extension OAuthConfiguration {
             redirectURI: redirectURI,
             additionalParameters: additionalParameters,
             usePKCE: usePKCE,
-            pkceCodeChallengeMethod: .S256
+            pkceCodeChallengeMethod: .S256,
+            resourceIndicator: resourceIndicator
         )
     }
     

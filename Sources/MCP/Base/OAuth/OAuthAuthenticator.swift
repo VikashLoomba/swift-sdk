@@ -15,10 +15,10 @@ import CommonCrypto
 
 /// Actor responsible for OAuth authentication and token management
 public actor OAuthAuthenticator {
-    private let configuration: OAuthConfiguration
-    private let tokenStorage: TokenStorage
-    private let urlSession: URLSession
-    private let logger: Logger
+    public let configuration: OAuthConfiguration
+    public let tokenStorage: TokenStorage
+    public let urlSession: URLSession
+    public let logger: Logger
     
     /// Current cached token
     private var currentToken: OAuthToken?
@@ -66,7 +66,7 @@ public actor OAuthAuthenticator {
         )
     }
     
-    /// Generate authorization URL for OAuth 2.1 authorization code flow with PKCE
+    /// Generate authorization URL for OAuth 2.1 authorization code flow with PKCE and resource indicators (MCP)
     public func generateAuthorizationURL(pkceState: PKCEState) throws -> URL {
         guard let redirectURI = configuration.redirectURI else {
             throw OAuthError.redirectURIRequired
@@ -90,6 +90,11 @@ public actor OAuthAuthenticator {
         if configuration.usePKCE {
             queryItems.append(URLQueryItem(name: "code_challenge", value: pkceState.codeChallenge))
             queryItems.append(URLQueryItem(name: "code_challenge_method", value: configuration.pkceCodeChallengeMethod.rawValue))
+        }
+        
+        // Add resource parameter for MCP (RFC 8707 Resource Indicators)
+        if let resourceIndicator = configuration.resourceIndicator {
+            queryItems.append(URLQueryItem(name: "resource", value: resourceIndicator))
         }
         
         // Add additional parameters
@@ -147,6 +152,11 @@ public actor OAuthAuthenticator {
         // Add PKCE code verifier if enabled
         if configuration.usePKCE {
             parameters["code_verifier"] = pkceState.codeVerifier
+        }
+        
+        // Add resource parameter for MCP (RFC 8707 Resource Indicators) 
+        if let resourceIndicator = configuration.resourceIndicator {
+            parameters["resource"] = resourceIndicator
         }
         
         // Add additional parameters
@@ -224,6 +234,11 @@ public actor OAuthAuthenticator {
             parameters["scope"] = configuration.scopes.joined(separator: " ")
         }
         
+        // Add resource parameter for MCP (RFC 8707 Resource Indicators)
+        if let resourceIndicator = configuration.resourceIndicator {
+            parameters["resource"] = resourceIndicator
+        }
+        
         // Add additional parameters
         if let additionalParams = configuration.additionalParameters {
             for (key, value) in additionalParams {
@@ -274,6 +289,11 @@ public actor OAuthAuthenticator {
                 parameters["client_secret"] = clientSecret
             }
             
+            // Add resource parameter for MCP token refresh (RFC 8707 Resource Indicators)
+            if let resourceIndicator = configuration.resourceIndicator {
+                parameters["resource"] = resourceIndicator
+            }
+            
             request.httpBody = formURLEncode(parameters).data(using: .utf8)
             
             let newToken = try await performTokenRequest(request)
@@ -316,6 +336,148 @@ public actor OAuthAuthenticator {
         } else {
             logger.info("Token revoked locally (no revocation endpoint configured)")
         }
+    }
+    
+    // MARK: - MCP Authorization Server Discovery
+    
+    /// Attempt authorization server discovery using MCP priority order
+    /// Tries OAuth 2.0 Authorization Server Metadata and OpenID Connect Discovery endpoints
+    public func discoverAuthorizationServerMetadata(from issuerURL: URL) async throws -> OAuthDiscoveryDocument {
+        logger.info("Attempting MCP authorization server discovery", metadata: ["issuer": "\(issuerURL.absoluteString)"])
+        
+        let discoveryURLs = buildMCPDiscoveryURLs(from: issuerURL)
+        
+        for (index, discoveryURL) in discoveryURLs.enumerated() {
+            logger.debug("Trying discovery endpoint \(index + 1)/\(discoveryURLs.count)", metadata: ["url": "\(discoveryURL.absoluteString)"])
+            
+            do {
+                let document = try await fetchDiscoveryDocument(from: discoveryURL)
+                logger.info("Successfully discovered authorization server metadata", metadata: ["endpoint": "\(discoveryURL.absoluteString)"])
+                return document
+            } catch {
+                logger.debug("Discovery attempt \(index + 1) failed", metadata: ["url": "\(discoveryURL.absoluteString)", "error": "\(error.localizedDescription)"])
+                
+                // If this is the last attempt, throw the error
+                if index == discoveryURLs.count - 1 {
+                    throw error
+                }
+            }
+        }
+        
+        throw OAuthError.invalidDiscoveryDocument("No valid discovery endpoints found")
+    }
+    
+    /// Build discovery URLs according to MCP specification priority order
+    private func buildMCPDiscoveryURLs(from issuerURL: URL) -> [URL] {
+        var discoveryURLs: [URL] = []
+        
+        let pathComponents = issuerURL.pathComponents.filter { $0 != "/" }
+        let hasPathComponents = !pathComponents.isEmpty
+        
+        if hasPathComponents {
+            // For issuer URLs with path components (e.g., https://auth.example.com/tenant1)
+            let pathString = pathComponents.joined(separator: "/")
+            
+            // Priority 1: OAuth 2.0 Authorization Server Metadata with path insertion
+            if let oauthPathInsertionURL = URL(string: "\(issuerURL.scheme!)://\(issuerURL.host!)\(issuerURL.port.map { ":\($0)" } ?? "")/.well-known/oauth-authorization-server/\(pathString)") {
+                discoveryURLs.append(oauthPathInsertionURL)
+            }
+            
+            // Priority 2: OpenID Connect Discovery 1.0 with path insertion
+            if let oidcPathInsertionURL = URL(string: "\(issuerURL.scheme!)://\(issuerURL.host!)\(issuerURL.port.map { ":\($0)" } ?? "")/.well-known/openid-configuration/\(pathString)") {
+                discoveryURLs.append(oidcPathInsertionURL)
+            }
+            
+            // Priority 3: OpenID Connect Discovery 1.0 path appending
+            if let oidcPathAppendingURL = URL(string: "\(issuerURL.absoluteString)/.well-known/openid-configuration") {
+                discoveryURLs.append(oidcPathAppendingURL)
+            }
+        } else {
+            // For issuer URLs without path components (e.g., https://auth.example.com)
+            
+            // Priority 1: OAuth 2.0 Authorization Server Metadata
+            if let oauthURL = URL(string: "\(issuerURL.absoluteString)/.well-known/oauth-authorization-server") {
+                discoveryURLs.append(oauthURL)
+            }
+            
+            // Priority 2: OpenID Connect Discovery 1.0
+            if let oidcURL = URL(string: "\(issuerURL.absoluteString)/.well-known/openid-configuration") {
+                discoveryURLs.append(oidcURL)
+            }
+        }
+        
+        return discoveryURLs
+    }
+    
+    /// Parse WWW-Authenticate header for OAuth 2.0 Protected Resource Metadata URL
+    public func parseWWWAuthenticateHeader(_ headerValue: String) throws -> URL? {
+        // Parse WWW-Authenticate header as per RFC 9728 Section 5.1
+        // Example: Bearer realm="example", resource_metadata="https://server.example.com/.well-known/oauth-protected-resource"
+        
+        let bearerPrefix = "Bearer "
+        guard headerValue.hasPrefix(bearerPrefix) else {
+            throw OAuthError.invalidWWWAuthenticateHeader("Not a Bearer challenge")
+        }
+        
+        let parameters = String(headerValue.dropFirst(bearerPrefix.count))
+        let components = parameters.components(separatedBy: ", ")
+        
+        for component in components {
+            let keyValue = component.components(separatedBy: "=")
+            if keyValue.count == 2 && keyValue[0] == "resource_metadata" {
+                let urlString = keyValue[1].trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+                return URL(string: urlString)
+            }
+        }
+        
+        return nil
+    }
+    
+    /// Fetch OAuth 2.0 Protected Resource Metadata (RFC 9728)
+    public func fetchProtectedResourceMetadata(from metadataURL: URL) async throws -> ProtectedResourceMetadata {
+        logger.info("Fetching protected resource metadata", metadata: ["url": "\(metadataURL.absoluteString)"])
+        
+        var request = URLRequest(url: metadataURL)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        
+        let (data, response) = try await urlSession.data(for: request)
+        
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw OAuthError.invalidResponse
+        }
+        
+        guard 200..<300 ~= httpResponse.statusCode else {
+            let errorBody = String(data: data, encoding: .utf8) ?? "Unknown error"
+            logger.error("Protected resource metadata request failed", metadata: [
+                "statusCode": "\(httpResponse.statusCode)",
+                "error": "\(errorBody)"
+            ])
+            throw OAuthError.protectedResourceMetadataFailed(httpResponse.statusCode, errorBody)
+        }
+        
+        do {
+            let metadata = try JSONDecoder().decode(ProtectedResourceMetadata.self, from: data)
+            logger.info("Successfully fetched protected resource metadata")
+            return metadata
+        } catch {
+            logger.error("Failed to decode protected resource metadata", metadata: ["error": "\(error)"])
+            throw OAuthError.invalidProtectedResourceMetadata(error.localizedDescription)
+        }
+    }
+    
+    /// Validate PKCE support in authorization server metadata (MCP requirement)
+    public func validatePKCESupport(in discoveryDocument: OAuthDiscoveryDocument) throws {
+        guard let supportedMethods = discoveryDocument.codeChallengeMethodsSupported else {
+            throw OAuthError.pkceNotSupported("Authorization server does not advertise PKCE support")
+        }
+        
+        // MCP requires PKCE support verification
+        if supportedMethods.isEmpty {
+            throw OAuthError.pkceNotSupported("Authorization server advertises empty PKCE methods")
+        }
+        
+        logger.info("PKCE support validated", metadata: ["methods": "\(supportedMethods.joined(separator: ", "))"])
     }
     
     // MARK: - OAuth 2.0 Dynamic Client Registration (RFC 7591)
@@ -673,6 +835,32 @@ public struct OAuthDiscoveryDocument: Codable, Sendable {
     }
 }
 
+/// OAuth 2.0 Protected Resource Metadata as per RFC 9728
+public struct ProtectedResourceMetadata: Codable, Sendable {
+    /// URI of the resource server
+    public let resource: String?
+    
+    /// Array of authorization server URIs
+    public let authorizationServers: [String]
+    
+    /// Array of supported scopes
+    public let scopesSupported: [String]?
+    
+    /// Array of supported bearer token methods
+    public let bearerMethodsSupported: [String]?
+    
+    /// Resource server metadata extensions
+    public let resourceDocumentation: String?
+    
+    enum CodingKeys: String, CodingKey {
+        case resource
+        case authorizationServers = "authorization_servers"
+        case scopesSupported = "scopes_supported"
+        case bearerMethodsSupported = "bearer_methods_supported"
+        case resourceDocumentation = "resource_documentation"
+    }
+}
+
 /// OAuth 2.0 Dynamic Client Registration Response as per RFC 7591
 public struct ClientRegistrationResponse: Codable, Sendable {
     /// The client identifier issued by the authorization server
@@ -739,6 +927,12 @@ public enum OAuthError: Swift.Error, LocalizedError, Equatable {
     case clientRegistrationFailed(Int, String)
     case invalidDiscoveryDocument(String)
     case invalidClientRegistrationResponse(String)
+    // MCP-specific errors
+    case invalidWWWAuthenticateHeader(String)
+    case protectedResourceMetadataFailed(Int, String)
+    case invalidProtectedResourceMetadata(String)
+    case pkceNotSupported(String)
+    case authorizationServerNotFound
     
     public var errorDescription: String? {
         switch self {
@@ -770,6 +964,17 @@ public enum OAuthError: Swift.Error, LocalizedError, Equatable {
             return "Invalid discovery document: \(error)"
         case .invalidClientRegistrationResponse(let error):
             return "Invalid client registration response: \(error)"
+        // MCP-specific error descriptions
+        case .invalidWWWAuthenticateHeader(let error):
+            return "Invalid WWW-Authenticate header: \(error)"
+        case .protectedResourceMetadataFailed(let statusCode, let body):
+            return "Protected resource metadata request failed with status \(statusCode): \(body)"
+        case .invalidProtectedResourceMetadata(let error):
+            return "Invalid protected resource metadata: \(error)"
+        case .pkceNotSupported(let error):
+            return "PKCE not supported: \(error)"
+        case .authorizationServerNotFound:
+            return "No authorization server found in protected resource metadata"
         }
     }
 }

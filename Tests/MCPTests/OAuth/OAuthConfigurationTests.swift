@@ -212,4 +212,58 @@ struct OAuthConfigurationTests {
             )
         }
     }
+    
+    @Test("OAuth configuration with resource indicator for MCP")
+    func testOAuthConfigurationWithResourceIndicator() throws {
+        let resourceURL = "https://mcp.example.com"
+        
+        let config = try OAuthConfiguration(
+            authorizationEndpoint: URL(string: "https://example.com/auth")!,
+            tokenEndpoint: URL(string: "https://example.com/token")!,
+            clientId: "test-client-id",
+            scopes: ["mcp:read", "mcp:write"],
+            redirectURI: URL(string: "https://example.com/callback")!,
+            resourceIndicator: resourceURL
+        )
+        
+        #expect(config.resourceIndicator == resourceURL)
+        #expect(config.clientType == .public)
+        #expect(config.usePKCE == true) // Public client requires PKCE
+    }
+    
+    @Test("MCP public client factory with resource indicator")
+    func testMCPPublicClientFactoryWithResourceIndicator() throws {
+        let resourceURL = "https://mcp.example.com"
+        
+        let config = try OAuthConfiguration.publicClient(
+            authorizationEndpoint: URL(string: "https://example.com/auth")!,
+            tokenEndpoint: URL(string: "https://example.com/token")!,
+            clientId: "mcp-client",
+            scopes: ["mcp:read"],
+            redirectURI: URL(string: "myapp://callback")!,
+            resourceIndicator: resourceURL
+        )
+        
+        #expect(config.resourceIndicator == resourceURL)
+        #expect(config.clientType == .public)
+        #expect(config.usePKCE == true)
+    }
+    
+    @Test("MCP confidential client factory with resource indicator")
+    func testMCPConfidentialClientFactoryWithResourceIndicator() throws {
+        let resourceURL = "https://mcp.example.com"
+        
+        let config = try OAuthConfiguration.confidentialClient(
+            authorizationEndpoint: URL(string: "https://example.com/auth")!,
+            tokenEndpoint: URL(string: "https://example.com/token")!,
+            clientId: "mcp-server-client",
+            clientSecret: "secret",
+            scopes: ["mcp:admin"],
+            resourceIndicator: resourceURL
+        )
+        
+        #expect(config.resourceIndicator == resourceURL)
+        #expect(config.clientType == .confidential)
+        #expect(config.clientSecret == "secret")
+    }
 }
