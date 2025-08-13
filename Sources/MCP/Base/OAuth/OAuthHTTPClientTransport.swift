@@ -191,9 +191,14 @@ public actor OAuthHTTPClientTransport: Transport {
                 
                 logger.info("Received 401 response, attempting MCP OAuth discovery")
                 
-                // TODO: Extract WWW-Authenticate header from the 401 response
-                // For now, assume we need to perform MCP OAuth discovery
-                try await performMCPOAuthDiscovery()
+                // Extract WWW-Authenticate header from the error message
+                var wwwAuthenticateHeader: String? = nil
+                if let message = message, message.contains("401 Unauthorized: ") {
+                    // Extract the header value after "401 Unauthorized: "
+                    wwwAuthenticateHeader = String(message.dropFirst("401 Unauthorized: ".count))
+                }
+                
+                try await performMCPOAuthDiscovery(wwwAuthenticateHeader: wwwAuthenticateHeader)
                 
                 // Retry the request with the new token
                 guard let newTransport = baseTransport else {
@@ -271,10 +276,10 @@ public actor OAuthHTTPClientTransport: Transport {
     }
     
     /// Perform MCP OAuth discovery and authentication flow
-    private func performMCPOAuthDiscovery() async throws {
+    private func performMCPOAuthDiscovery(wwwAuthenticateHeader: String? = nil) async throws {
         logger.info("Starting MCP OAuth discovery process")
         
-        let (authServerURL, discoveryDocument) = try await discoverOAuthServerMetadata()
+        let (authServerURL, discoveryDocument) = try await discoverOAuthServerMetadata(wwwAuthenticateHeader: wwwAuthenticateHeader)
         
         if await authenticator.configuration.clientType == .public {
             try await handlePublicClientFlow(discoveryDocument: discoveryDocument)
@@ -283,12 +288,29 @@ public actor OAuthHTTPClientTransport: Transport {
         }
     }
     
-    private func discoverOAuthServerMetadata() async throws -> (URL, OAuthDiscoveryDocument) {
-        // Step 1: Fetch protected resource metadata from MCP server
-        let metadataURL = endpoint.appendingPathComponent(".well-known/oauth-protected-resource")
+    private func discoverOAuthServerMetadata(wwwAuthenticateHeader: String? = nil) async throws -> (URL, OAuthDiscoveryDocument) {
+        // Step 1: Try to get metadata URL from WWW-Authenticate header if available
+        var metadataURL: URL
+        
+        if let wwwAuthHeader = wwwAuthenticateHeader {
+            // Parse the WWW-Authenticate header for resource_metadata URL
+            if let parsedURL = try await authenticator.parseWWWAuthenticateHeader(wwwAuthHeader) {
+                logger.info("Found resource metadata URL in WWW-Authenticate header", metadata: ["url": "\(parsedURL.absoluteString)"])
+                metadataURL = parsedURL
+            } else {
+                // Fallback to default well-known location
+                logger.info("No resource_metadata in WWW-Authenticate header, using default location")
+                metadataURL = endpoint.appendingPathComponent(".well-known/oauth-protected-resource")
+            }
+        } else {
+            // No WWW-Authenticate header, use default well-known location
+            metadataURL = endpoint.appendingPathComponent(".well-known/oauth-protected-resource")
+        }
+        
+        // Step 2: Fetch protected resource metadata from MCP server
         let metadata = try await authenticator.fetchProtectedResourceMetadata(from: metadataURL)
         
-        // Step 2: Select the first authorization server from the metadata
+        // Step 3: Select the first authorization server from the metadata
         guard let firstAuthServerString = metadata.authorizationServers.first,
               let authServerURL = URL(string: firstAuthServerString) else {
             throw OAuthError.authorizationServerNotFound
@@ -296,10 +318,10 @@ public actor OAuthHTTPClientTransport: Transport {
         
         logger.info("Found authorization server", metadata: ["server": "\(authServerURL.absoluteString)"])
         
-        // Step 3: Discover authorization server metadata using MCP priority order
+        // Step 4: Discover authorization server metadata using MCP priority order
         let discoveryDocument = try await authenticator.discoverAuthorizationServerMetadata(from: authServerURL)
         
-        // Step 4: Validate PKCE support (required by MCP)
+        // Step 5: Validate PKCE support (required by MCP)
         try await authenticator.validatePKCESupport(in: discoveryDocument)
         
         return (authServerURL, discoveryDocument)

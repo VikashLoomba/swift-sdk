@@ -329,7 +329,12 @@ public actor HTTPClientTransport: Transport {
             throw MCPError.internalError("Bad request")
 
         case 401:
-            throw MCPError.internalError("Authentication required")
+            // Check for WWW-Authenticate header (RFC 9728 for MCP OAuth)
+            if let wwwAuthHeader = response.value(forHTTPHeaderField: "WWW-Authenticate") {
+                throw MCPError.internalError("401 Unauthorized: \(wwwAuthHeader)")
+            } else {
+                throw MCPError.internalError("401 Unauthorized")
+            }
 
         case 403:
             throw MCPError.internalError("Access forbidden")

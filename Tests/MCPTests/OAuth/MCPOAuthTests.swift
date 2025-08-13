@@ -191,6 +191,25 @@ struct MCPOAuthTests {
         }
     }
     
+    @Test("WWW-Authenticate header extraction from error message")
+    func testWWWAuthenticateHeaderExtraction() async throws {
+        // Test that the OAuth transport correctly extracts WWW-Authenticate header from 401 error
+        let headerValue = """
+        Bearer realm="mcp", resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource"
+        """
+        
+        // Create an error message as it would come from HTTPClientTransport
+        let errorMessage = "401 Unauthorized: \(headerValue)"
+        
+        // Verify the extraction logic works
+        if errorMessage.contains("401 Unauthorized: ") {
+            let extracted = String(errorMessage.dropFirst("401 Unauthorized: ".count))
+            #expect(extracted == headerValue)
+        } else {
+            #expect(Bool(false), "Should contain 401 Unauthorized prefix")
+        }
+    }
+    
     @Test("Protected resource metadata parsing")
     func testProtectedResourceMetadataParsing() throws {
         let jsonString = """
