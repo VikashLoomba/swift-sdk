@@ -283,7 +283,7 @@ public actor OAuthHTTPClientTransport: Transport {
         }
     }
     
-    private func discoverOAuthServerMetadata() async throws -> (URL, AuthorizationServerMetadata) {
+    private func discoverOAuthServerMetadata() async throws -> (URL, OAuthDiscoveryDocument) {
         // Step 1: Fetch protected resource metadata from MCP server
         let metadataURL = endpoint.appendingPathComponent(".well-known/oauth-protected-resource")
         let metadata = try await authenticator.fetchProtectedResourceMetadata(from: metadataURL)
@@ -300,12 +300,12 @@ public actor OAuthHTTPClientTransport: Transport {
         let discoveryDocument = try await authenticator.discoverAuthorizationServerMetadata(from: authServerURL)
         
         // Step 4: Validate PKCE support (required by MCP)
-        try authenticator.validatePKCESupport(in: discoveryDocument)
+        try await authenticator.validatePKCESupport(in: discoveryDocument)
         
         return (authServerURL, discoveryDocument)
     }
     
-    private func handlePublicClientFlow(discoveryDocument: AuthorizationServerMetadata) async throws {
+    private func handlePublicClientFlow(discoveryDocument: OAuthDiscoveryDocument) async throws {
         logger.info("Public client detected - authorization code flow with PKCE required")
         
         // Generate PKCE state
@@ -332,7 +332,7 @@ public actor OAuthHTTPClientTransport: Transport {
         throw OAuthError.authenticationRequired
     }
     
-    private func handleConfidentialClientFlow(discoveryDocument: AuthorizationServerMetadata) async throws {
+    private func handleConfidentialClientFlow(discoveryDocument: OAuthDiscoveryDocument) async throws {
         logger.info("Confidential client detected - using client credentials flow")
         
         // Create authenticator with discovered endpoints and resource indicator
@@ -356,7 +356,7 @@ public actor OAuthHTTPClientTransport: Transport {
     }
     
     private func createMCPConfiguration(
-        from discoveryDocument: AuthorizationServerMetadata,
+        from discoveryDocument: OAuthDiscoveryDocument,
         basedOn originalConfig: OAuthConfiguration,
         usePKCE: Bool,
         includeRedirectURI: Bool

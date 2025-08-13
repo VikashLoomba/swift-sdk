@@ -61,8 +61,8 @@ struct MCPOAuthTests {
             // This should try multiple endpoints in the correct order
             _ = try await authenticator.discoverAuthorizationServerMetadata(from: issuerURL)
         } catch {
-            // Expected to fail in tests without real server
-            #expect(error is OAuthError)
+            // Expected to fail in tests without real server (network error is acceptable)
+            #expect(error is OAuthError || error is URLError)
         }
     }
     
@@ -80,13 +80,13 @@ struct MCPOAuthTests {
         do {
             _ = try await authenticator.discoverAuthorizationServerMetadata(from: issuerURL)
         } catch {
-            // Expected to fail in tests without real server
-            #expect(error is OAuthError)
+            // Expected to fail in tests without real server (network error is acceptable)
+            #expect(error is OAuthError || error is URLError)
         }
     }
     
     @Test("WWW-Authenticate header parsing")
-    func testWWWAuthenticateHeaderParsing() throws {
+    func testWWWAuthenticateHeaderParsing() async throws {
         let config = try OAuthConfiguration(
             authorizationEndpoint: URL(string: "https://example.com/auth")!,
             tokenEndpoint: URL(string: "https://example.com/token")!,
@@ -100,23 +100,28 @@ struct MCPOAuthTests {
         Bearer realm="example", resource_metadata="https://server.example.com/.well-known/oauth-protected-resource"
         """
         
-        let metadataURL = try authenticator.parseWWWAuthenticateHeader(validHeader)
+        let metadataURL = try await authenticator.parseWWWAuthenticateHeader(validHeader)
         #expect(metadataURL?.absoluteString == "https://server.example.com/.well-known/oauth-protected-resource")
         
         // Test header without resource_metadata
         let headerWithoutMetadata = "Bearer realm=\"example\""
-        let noMetadataURL = try authenticator.parseWWWAuthenticateHeader(headerWithoutMetadata)
+        let noMetadataURL = try await authenticator.parseWWWAuthenticateHeader(headerWithoutMetadata)
         #expect(noMetadataURL == nil)
         
         // Test invalid header
         let invalidHeader = "Basic realm=\"example\""
-        #expect(throws: OAuthError.self) {
-            _ = try authenticator.parseWWWAuthenticateHeader(invalidHeader)
+        do {
+            _ = try await authenticator.parseWWWAuthenticateHeader(invalidHeader)
+            #expect(Bool(false), "Should have thrown an error")
+        } catch is OAuthError {
+            // Expected
+        } catch {
+            #expect(Bool(false), "Unexpected error: \(error)")
         }
     }
     
     @Test("PKCE support validation")
-    func testPKCESupportValidation() throws {
+    func testPKCESupportValidation() async throws {
         let config = try OAuthConfiguration(
             authorizationEndpoint: URL(string: "https://example.com/auth")!,
             tokenEndpoint: URL(string: "https://example.com/token")!,
@@ -138,9 +143,8 @@ struct MCPOAuthTests {
             codeChallengeMethodsSupported: ["S256", "plain"]
         )
         
-        #expect(throws: Never.self) {
-            try authenticator.validatePKCESupport(in: validDiscoveryDoc)
-        }
+        // Should not throw for valid discovery document
+        try await authenticator.validatePKCESupport(in: validDiscoveryDoc)
         
         // Test discovery document without PKCE support
         let noPKCEDiscoveryDoc = OAuthDiscoveryDocument(
@@ -155,8 +159,13 @@ struct MCPOAuthTests {
             codeChallengeMethodsSupported: nil
         )
         
-        #expect(throws: OAuthError.self) {
-            try authenticator.validatePKCESupport(in: noPKCEDiscoveryDoc)
+        do {
+            try await authenticator.validatePKCESupport(in: noPKCEDiscoveryDoc)
+            #expect(Bool(false), "Should have thrown an error")
+        } catch is OAuthError {
+            // Expected
+        } catch {
+            #expect(Bool(false), "Unexpected error: \(error)")
         }
         
         // Test discovery document with empty PKCE methods
@@ -172,8 +181,13 @@ struct MCPOAuthTests {
             codeChallengeMethodsSupported: []
         )
         
-        #expect(throws: OAuthError.self) {
-            try authenticator.validatePKCESupport(in: emptyPKCEDiscoveryDoc)
+        do {
+            try await authenticator.validatePKCESupport(in: emptyPKCEDiscoveryDoc)
+            #expect(Bool(false), "Should have thrown an error")
+        } catch is OAuthError {
+            // Expected
+        } catch {
+            #expect(Bool(false), "Unexpected error: \(error)")
         }
     }
     

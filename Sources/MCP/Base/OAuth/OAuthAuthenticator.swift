@@ -673,6 +673,7 @@ public actor OAuthAuthenticator {
         return digest.base64URLEncodedString()
         #endif
     }
+    #endif
     
     #if canImport(CommonCrypto) && !canImport(CryptoKit)
     /// Fallback SHA256 implementation for platforms with CommonCrypto
@@ -923,6 +924,7 @@ public enum OAuthError: Swift.Error, LocalizedError, Equatable {
     case clientRegistrationFailed(Int, String)
     case invalidDiscoveryDocument(String)
     case invalidClientRegistrationResponse(String)
+    case invalidConfiguration(String)
     // MCP-specific errors
     case invalidWWWAuthenticateHeader(String)
     case protectedResourceMetadataFailed(Int, String)
@@ -960,6 +962,8 @@ public enum OAuthError: Swift.Error, LocalizedError, Equatable {
             return "Invalid discovery document: \(error)"
         case .invalidClientRegistrationResponse(let error):
             return "Invalid client registration response: \(error)"
+        case .invalidConfiguration(let error):
+            return "Invalid OAuth configuration: \(error)"
         // MCP-specific error descriptions
         case .invalidWWWAuthenticateHeader(let error):
             return "Invalid WWW-Authenticate header: \(error)"
