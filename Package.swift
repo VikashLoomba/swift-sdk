@@ -1,4 +1,4 @@
-// swift-tools-version:6.0
+// swift-tools-version:6.1
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
@@ -7,14 +7,16 @@ import PackageDescription
 var dependencies: [Package.Dependency] = [
     .package(url: "https://github.com/apple/swift-system.git", from: "1.0.0"),
     .package(url: "https://github.com/apple/swift-log.git", from: "1.5.0"),
-    .package(url: "https://github.com/mattt/eventsource.git", from: "1.1.0")
+    .package(url: "https://github.com/mattt/eventsource.git", from: "1.1.0"),
 ]
 
 // Target dependencies needed on all platforms
 var targetDependencies: [Target.Dependency] = [
     .product(name: "SystemPackage", package: "swift-system"),
     .product(name: "Logging", package: "swift-log"),
-    .product(name: "EventSource", package: "eventsource", condition: .when(platforms: [.macOS, .iOS, .tvOS, .visionOS, .watchOS]))
+    .product(
+        name: "EventSource", package: "eventsource",
+        condition: .when(platforms: [.macOS, .iOS, .tvOS, .visionOS, .watchOS, .macCatalyst])),
 ]
 
 let package = Package(
@@ -39,7 +41,11 @@ let package = Package(
         // Targets can depend on other targets in this package and products from dependencies.
         .target(
             name: "MCP",
-            dependencies: targetDependencies),
+            dependencies: targetDependencies,
+            swiftSettings: [
+                .enableUpcomingFeature("StrictConcurrency")
+            ]
+        ),
         .testTarget(
             name: "MCPTests",
             dependencies: ["MCP"] + targetDependencies),
